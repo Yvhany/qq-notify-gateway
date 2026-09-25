@@ -20,3 +20,5 @@ node_modules/
 .idea/
 .vscode/
 .DS_Store
+
+diff_idx.txt
