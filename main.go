@@ -54,9 +54,14 @@ func main() {
 		if typ == "" {
 			typ = cfg.TargetType
 		}
-		if err := target.Update(typ, st.TargetOpenID); err == nil {
+		if err := target.Update(typ, st.TargetOpenID); err != nil {
+			log.Printf("警告: 持久化目标覆盖失败（沿用 .env 初值）: %v", err)
+		} else {
 			log.Printf("已加载持久化推送目标: type=%s id=%s", typ, st.TargetOpenID)
 		}
+	}
+	if typ, id := target.Snapshot(); typ != cfg.TargetType || id != cfg.TargetOpenID {
+		log.Printf("生效推送目标: type=%s id=%s（初始 .env: type=%s id=%s）", typ, id, cfg.TargetType, cfg.TargetOpenID)
 	}
 	listener := newOpenIDListener(hub)
 

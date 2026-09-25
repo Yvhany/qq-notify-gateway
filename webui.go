@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,6 +34,7 @@ type webUI struct {
 	dataDir  string
 	started  time.Time
 	statePat string
+	stateMu  sync.Mutex // webui.json 的 load→save 互斥（webhook/target 两类写方）
 	target   *targetState
 	qq       *QQClient
 	listener *openIDListener
@@ -145,10 +147,13 @@ func (u *webUI) handleWebhookPut(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	u.stateMu.Lock()
 	st := u.loadState()
 	st.WebhookURL = req.URL
-	if err := u.saveState(st); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+	saveErr := u.saveState(st)
+	u.stateMu.Unlock()
+	if saveErr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": saveErr.Error()})
 		return
 	}
 	u.hub.Broadcast("webhook", map[string]any{"url": st.WebhookURL})
