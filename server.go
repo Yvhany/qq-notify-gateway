@@ -19,10 +19,10 @@ type notifyRequest struct {
 }
 
 // newMux 组装网关 HTTP 路由：入站推送 + Web UI。
-func newMux(cfg Config, qq *QQClient, ui *webUI) http.Handler {
+func newMux(tok *tokenState, qq *QQClient, ui *webUI) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /notify", func(w http.ResponseWriter, r *http.Request) {
-		handleNotify(cfg, qq, ui, w, r)
+		handleNotify(tok, qq, ui, w, r)
 	})
 
 	// Web UI（内嵌前端与 API）
@@ -37,6 +37,7 @@ func newMux(cfg Config, qq *QQClient, ui *webUI) http.Handler {
 	mux.HandleFunc("POST /api/openid/listen", ui.handleOpenIDListen)
 	mux.HandleFunc("POST /api/openid/stop", ui.handleOpenIDStop)
 	mux.HandleFunc("PUT /api/target", ui.handleTargetPut)
+	mux.HandleFunc("POST /api/token/reset", ui.handleTokenReset)
 	mux.HandleFunc("GET /api/ws", ui.hub.ServeWS)
 	mux.HandleFunc("GET /", ui.handleIndex)
 	return mux
@@ -48,12 +49,15 @@ func writeJSON(w http.ResponseWriter, status int, payload map[string]any) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
-func handleNotify(cfg Config, qq *QQClient, ui *webUI, w http.ResponseWriter, r *http.Request) {
-	if cfg.GatewayToken != "" &&
-		subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Gateway-Token")), []byte(cfg.GatewayToken)) != 1 {
-		// 鉴权失败视为攻击噪声，不入推送记录
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid gateway token"})
-		return
+func handleNotify(tok *tokenState, qq *QQClient, ui *webUI, w http.ResponseWriter, r *http.Request) {
+	// 入站校验：token 非空时必须携带正确请求头（生产启动即自动生成，必然非空）
+	if tok != nil {
+		if effective := tok.Snapshot(); effective != "" &&
+			subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Gateway-Token")), []byte(effective)) != 1 {
+			// 鉴权失败视为攻击噪声，不入推送记录
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid gateway token"})
+			return
+		}
 	}
 
 	var (

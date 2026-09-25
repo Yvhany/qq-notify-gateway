@@ -80,9 +80,16 @@ Cloudflare Worker（`contrib/bootstrap-worker/`）因所在网络对 `workers.de
   - `image` 为 JPEG/PNG 的 base64（容忍 `data:image/...;base64,` 前缀）；`title`、
     `content` 可为空，均为空且无图时返回 400。
   - 与三月七小助手 Webhook 渠道 body 模板 `{"title":"{title}","content":"{content}","image":"{image}"}` 一一对应。
-- 可选入站鉴权：环境变量 `GATEWAY_TOKEN` 非空时要求请求头
-  `X-Gateway-Token` 与其相等（401 否则）；为空则不校验（默认，LAN 部署）。
+- 可选入站鉴权 → **入站校验 Token（自动生成、可复制、可重置）**：
+  有效 token 解析顺序 `webui.json` → 环境变量 `GATEWAY_TOKEN` → **首次启动
+  自动生成（crypto/rand 32 字节 hex）并持久化**；非空时 `/notify` 必须携带请求头
+  `X-Gateway-Token`（constant-time 比较，失败 401；鉴权失败不入推送记录）。
+  - `POST /api/token/reset` 生成新 token，**先持久化成功再替换内存**（失败不换），
+    返回新值；旧 token 立即失效，重启保持新值。
+  - `/api/config` 与接入指引展示有效 token（用户要求不打码，反代兜底）；指引页
+    提供「复制请求头」「重置」操作；**token 不写入日志**。
 - 成功返回 200 `{"ok":true}`；QQ 调用失败返回 502 并带错误信息（调用方可见失败）。
+- **接收地址必须带 `/notify` 后缀**（路由为精确 `POST /notify`；`/` 仅服务 UI）。
 
 ### 配置（环境变量，`.env` 注入）
 
@@ -219,6 +226,7 @@ Cloudflare Worker（`contrib/bootstrap-worker/`）因所在网络对 `workers.de
    版本与运行时长；另含：
    - **三月七小助手接入指引**：四字段（接收地址/请求方法/请求头/请求体）现值与
      可复制模板（对齐小助手内嵌教程，规避 `message` 键名与 multipart 两坑）；
+     **请求头字段展示有效 token 的完整 JSON、支持一键复制与重置**；
    - **OpenID 采集面板**：一键 60 秒监听（发消息/拉群/@ 均可被抓）、实时显示
      抓到的 c2c/group、单聊↔群组切换并保存（见 S2 目标切换）。
 
@@ -266,3 +274,4 @@ WebSocket 入站、签名校验、消息模板页、渠道管理页（仅 QQ 单
 - [x] T10: UI 挂卷部署与端到端验证 — acceptance: NAS 挂 `./data` 卷后真实推送实时入表且图片可点开；容器重启记录/日志/域名仍在 (covers: S4; depends: T9)
 - [x] T11: 运行时 OpenID 采集与目标切换 — acceptance: `POST /api/openid/listen` 60s 窗口内私聊/@/拉群均可抓取并经 WS 实时广播；`PUT /api/target` 切换单聊/群组后新推送走新目标，重启后仍生效 (covers: S2 运行时采集; depends: T9)
 - [x] T12: 系统配置页指引与采集 UI — acceptance: 四字段接入指引可复制；监听按钮/倒计时/抓取结果/目标切换 UI 与后端联调通过 (covers: S4 系统配置; depends: T11)
+- [ ] T13: 入站校验 Token — acceptance: 首启自动生成并持久化；无/错 token 401、正确 token 200；重置后旧失效新生效且重启保持；指引页可复制/重置；`go test` 全绿 (covers: S2 入站鉴权; depends: T1)
