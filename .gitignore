@@ -5,7 +5,6 @@
 
 # build
 /qq-notify-gateway
-/gateway.exe
 *.exe
 /bin/
 dist/

@@ -152,8 +152,13 @@ func (c *QQClient) UploadImage(ctx context.Context, filename string, data []byte
 	)
 	sem := make(chan struct{}, concurrency)
 	for i, p := range sorted {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
+		if err := ctx.Err(); err != nil {
+			mu.Lock()
+			if firstErr == nil {
+				firstErr = err
+			}
+			mu.Unlock()
+			break // 已在途的分片仍等其结束，避免泄漏 goroutine
 		}
 		wg.Add(1)
 		sem <- struct{}{}
