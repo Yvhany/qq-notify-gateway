@@ -10,10 +10,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tencent-connect/botgo/constant"
 	"github.com/tencent-connect/botgo/token"
 )
 
 func main() {
+	// 官方文档现行 token 端点为 api.bot.qq.com；老的 bots.qq.com 对新应用返回 100002
+	constant.TokenDomain = "https://api.bot.qq.com"
+
 	cfg, err := LoadConfig()
 	if err != nil {
 		log.Fatalf("配置错误: %v", err)
