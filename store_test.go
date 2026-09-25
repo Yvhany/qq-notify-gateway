@@ -112,10 +112,11 @@ func TestNotifyWritesRecordAndImage(t *testing.T) {
 	defer mock.Close()
 
 	cfg := Config{AppID: "a", Secret: "s", TargetType: "c2c", TargetOpenID: "OPENID_TEST", APIBase: mock.URL}
-	qq := NewQQClient(cfg, staticTokenSource{}, 5*time.Second)
+	qq := NewQQClient(cfg, staticTokenSource{}, 5*time.Second, newTargetState(cfg.TargetType, cfg.TargetOpenID))
 	store, _ := NewRecordStore(t.TempDir())
 	hub := NewHub()
-	ui := newWebUI(cfg, store, hub, t.TempDir())
+	listener := newOpenIDListener(hub)
+	ui := newWebUI(cfg, store, hub, t.TempDir(), qq.target, qq, listener)
 	handler := newMux(cfg, qq, ui)
 
 	img := pngMagic(64)

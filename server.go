@@ -33,6 +33,10 @@ func newMux(cfg Config, qq *QQClient, ui *webUI) http.Handler {
 	mux.HandleFunc("GET /api/logs", ui.handleLogs)
 	mux.HandleFunc("GET /api/webhook", ui.handleWebhookGet)
 	mux.HandleFunc("PUT /api/webhook", ui.handleWebhookPut)
+	mux.HandleFunc("GET /api/openid", ui.handleOpenIDGet)
+	mux.HandleFunc("POST /api/openid/listen", ui.handleOpenIDListen)
+	mux.HandleFunc("POST /api/openid/stop", ui.handleOpenIDStop)
+	mux.HandleFunc("PUT /api/target", ui.handleTargetPut)
 	mux.HandleFunc("GET /api/ws", ui.hub.ServeWS)
 	mux.HandleFunc("GET /", ui.handleIndex)
 	return mux

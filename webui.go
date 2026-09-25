@@ -18,29 +18,37 @@ var webuiFS embed.FS
 
 var version = "dev"
 
-// webhookCfg 持久化的公网域名（仅 UI 展示与复制用）。
-type webhookCfg struct {
-	WebhookURL string `json:"webhook_url"`
+// stateFile 持久化的 UI/目标状态（DATA_DIR/webui.json）。
+type stateFile struct {
+	WebhookURL   string `json:"webhook_url"`
+	TargetType   string `json:"target_type,omitempty"`
+	TargetOpenID string `json:"target_openid,omitempty"`
 }
 
 // webUI 聚合 Web 界面所需依赖与状态。
 type webUI struct {
-	cfg         Config
-	store       *RecordStore
-	hub         *Hub
-	dataDir     string
-	startedAt   time.Time
-	webhookFile string
+	cfg      Config
+	store    *RecordStore
+	hub      *Hub
+	dataDir  string
+	started  time.Time
+	statePat string
+	target   *targetState
+	qq       *QQClient
+	listener *openIDListener
 }
 
-func newWebUI(cfg Config, store *RecordStore, hub *Hub, dataDir string) *webUI {
+func newWebUI(cfg Config, store *RecordStore, hub *Hub, dataDir string, target *targetState, qq *QQClient, listener *openIDListener) *webUI {
 	return &webUI{
-		cfg:         cfg,
-		store:       store,
-		hub:         hub,
-		dataDir:     dataDir,
-		startedAt:   time.Now(),
-		webhookFile: filepath.Join(dataDir, "webui.json"),
+		cfg:      cfg,
+		store:    store,
+		hub:      hub,
+		dataDir:  dataDir,
+		started:  time.Now(),
+		statePat: filepath.Join(dataDir, "webui.json"),
+		target:   target,
+		qq:       qq,
+		listener: listener,
 	}
 }
 
@@ -78,21 +86,22 @@ func (u *webUI) handleRecordImage(w http.ResponseWriter, r *http.Request) {
 
 // handleConfig 只读全量配置（按用户指示不打码，访问控制由反代承担）。
 func (u *webUI) handleConfig(w http.ResponseWriter, _ *http.Request) {
-	wh := u.loadWebhook()
+	st := u.loadState()
+	typ, id := u.target.Snapshot()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true,
 		"config": map[string]any{
-			"target_type":    u.cfg.TargetType,
-			"target_openid":  u.cfg.TargetOpenID,
+			"target_type":    typ,
+			"target_openid":  id,
 			"api_base":       u.cfg.APIBase,
 			"listen_addr":    u.cfg.ListenAddr,
 			"app_id":         u.cfg.AppID,
 			"app_secret":     u.cfg.Secret,
 			"gateway_token":  u.cfg.GatewayToken,
 			"data_dir":       u.dataDir,
-			"webhook_url":    wh.WebhookURL,
+			"webhook_url":    st.WebhookURL,
 			"version":        version,
-			"uptime_seconds": int(time.Since(u.startedAt).Seconds()),
+			"uptime_seconds": int(time.Since(u.started).Seconds()),
 			"ws_clients":     u.hub.ClientCount(),
 		},
 	})
@@ -110,8 +119,8 @@ func (u *webUI) handleLogs(w http.ResponseWriter, r *http.Request) {
 
 // handleWebhookGet 读取已保存的公网域名。
 func (u *webUI) handleWebhookGet(w http.ResponseWriter, _ *http.Request) {
-	wh := u.loadWebhook()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": wh.WebhookURL})
+	st := u.loadState()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": st.WebhookURL})
 }
 
 // handleWebhookPut 保存公网域名（仅 http/https，空值表示清除）。
@@ -136,24 +145,39 @@ func (u *webUI) handleWebhookPut(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	wh := webhookCfg{WebhookURL: req.URL}
-	data, _ := json.MarshalIndent(wh, "", "  ")
-	if err := os.WriteFile(u.webhookFile, data, 0o644); err != nil {
+	st := u.loadState()
+	st.WebhookURL = req.URL
+	if err := u.saveState(st); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	u.hub.Broadcast("webhook", wh)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": wh.WebhookURL})
+	u.hub.Broadcast("webhook", map[string]any{"url": st.WebhookURL})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": st.WebhookURL})
 }
 
-func (u *webUI) loadWebhook() webhookCfg {
-	var wh webhookCfg
-	data, err := os.ReadFile(u.webhookFile)
+// loadState 读取持久化状态文件。
+func (u *webUI) loadState() stateFile {
+	return loadStateFrom(u.dataDir)
+}
+
+// saveState 写入持久化状态文件。
+func (u *webUI) saveState(st stateFile) error {
+	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
-		return wh
+		return err
 	}
-	_ = json.Unmarshal(data, &wh)
-	return wh
+	return os.WriteFile(u.statePat, data, 0o644)
+}
+
+// loadStateFrom 包级读取（main 启动时应用目标覆盖）。
+func loadStateFrom(dataDir string) stateFile {
+	var st stateFile
+	data, err := os.ReadFile(filepath.Join(dataDir, "webui.json"))
+	if err != nil {
+		return st
+	}
+	_ = json.Unmarshal(data, &st)
+	return st
 }
 
 // handleIndex 提供内嵌的单文件前端。

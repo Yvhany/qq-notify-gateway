@@ -38,6 +38,11 @@ func TestHubBroadcastConcurrent(t *testing.T) {
 			t.Fatalf("client %d 首帧应为 hello: %s %v", i, msg, err)
 		}
 	}
+	// hello 先于注册写入（无竞态设计），注册完成是异步的，给一个短暂期限
+	regDeadline := time.Now().Add(2 * time.Second)
+	for hub.ClientCount() != clients && time.Now().Before(regDeadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
 	if n := hub.ClientCount(); n != clients {
 		t.Fatalf("ClientCount = %d, want %d", n, clients)
 	}
