@@ -38,9 +38,24 @@ WS 连接仅在页面可见时建立，隐藏/关闭即断开；服务端无客�
 
 ## 三月七小助手接入（Webhook 渠道）
 
+设置页四个字段（与官方教程逐项对照）：
+
+| 设置项 | 填写值 |
+|---|---|
+| 接收地址 | `http://192.168.1.21:18080/notify`（反代后改公网域名，并同步到 Web UI「公网域名」） |
+| 请求方法 | 留空（默认 POST；网关仅接受 POST） |
+| 请求头 | 留空（未启用 GATEWAY_TOKEN；Content-Type 由小助手自动补） |
+| 请求体 | **必填**：`{"title":"{title}","content":"{content}","image":"{image}"}` |
+
+> 两个坑：① 教程示例里的 `"message"` 键名不能照抄，网关只认 `title/content/image`；
+> ② 请求体不配模板时带图会走 multipart（网关 400），所以必须配置模板。
+> 配完点设置页「发送消息」测试，Web UI 记录页应实时出现该条记录。
+
+等价的 config.example.yaml 写法：
+
 ```yaml
 notify_webhook_enable: true
-notify_webhook_url: "http://192.168.1.21:18080/notify"   # 反代后改成你的公网域名
+notify_webhook_url: "http://192.168.1.21:18080/notify"
 notify_webhook_body: '{"title":"{title}","content":"{content}","image":"{image}"}'
 ```
 
