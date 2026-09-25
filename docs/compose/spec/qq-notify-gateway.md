@@ -3,7 +3,7 @@ feature: qq-notify-gateway
 status: delivered
 updated: 2026-09-26
 branch: feat/qq-webhook-gateway
-commits: e187523..4a1e881
+commits: e187523..d01bad2
 ---
 
 # QQ Notify Gateway
@@ -14,33 +14,38 @@ commits: e187523..4a1e881
 {title, content, image(base64)}，经 botgo token source（api.bot.qq.com 官方端点、
 自动刷新）调用 QQ 开放平台 API v2，先发文本（msg_type 0）再经四步分片上传
 （prepare → 预签名 PUT → part_finish → 合并）发图（msg_type 7），单聊/群聊
-双路径；`-bootstrap` 模式用 WS 长连接一次性抓取 openid。内置按用户模板裁剪的
-Deliver 风格 Web UI（embed 同端口）：数据看板（真实统计+SVG 趋景+WS 事件流）、
-高密度推送记录（编号/截断内容/缩略图/来源/状态）、WebHook 接入（公网域名可编辑）、
-系统日志（持久化+WS 实时）、系统配置只读；记录/日志/域名全部落盘于 DATA_DIR 卷，
-WS 采用每连接队列且仅在页面可见时建立。部署于 NAS 单容器（18080），不触碰其他项目。
+双路径；openid 获取双通道：`-bootstrap` 一次性 WS 模式 + **运行时 60 秒采集窗口**
+（系统配置页一键启动，私聊/拉群/@ 三种动作均可抓取，WS 实时广播），并支持
+**单聊↔群组目标在线切换**（校验→落盘→生效，数据卷持久化、重启保持）。
+内置按用户模板裁剪的 Deliver 风格 Web UI（embed 同端口）：数据看板（真实统计+
+SVG 趋景+WS 事件流）、高密度推送记录（编号/截断内容/缩略图/来源/状态）、
+WebHook 接入（公网域名可编辑）、系统日志（持久化+WS 实时）、系统配置
+（全量只读不打码 + **三月七小助手四字段接入指引** + OpenID 采集与目标切换面板）；
+记录/日志/域名/目标全部落盘于 DATA_DIR 卷，WS 采用每连接队列且仅在页面可见时
+建立。部署于 NAS 单容器（18080），不触碰其他项目。
 
-**Verification** — `go build/vet ./...` PASS；`go test -count=1 ./...` PASS（终验
-ok qq-notify-gateway 1.360s，覆盖配置/入站/分片上传/记录存储/hub 并发）；前端
-`vm.Script` 语法 PASS；NAS 实测：`docker compose config` OK、UI GET 200、
-`/api/stats|records|config|logs|webhook` 全通、webhook PUT/GET 往返、
-WS E2E（hello+record+stats 实时帧）×2 PASS、`/api/records/1/image` 200 JPEG
-可解码、`docker compose restart` 后记录与域名仍在、`docker logs` 可见应用日志、
-真实文本+截图多次到达用户 QQ（用户确认“已经好了”）。两轮独立评审
-（bf101e4、4a1e881）必改项全部修复并复测。
+**Verification** — `go build/vet ./...` PASS；`go test -count=1 ./...` 多轮全绿
+（终验三连 ok，覆盖配置/入站/分片上传/记录存储/hub 并发/目标切换/mock WS 采集
+全流程）；前端 `vm.Script` 语法 PASS；NAS 实测：`docker compose config` OK、
+UI GET 200、全部 `/api/*` 通、webhook PUT/GET 往返、WS E2E（hello+record+stats）
+×2 PASS、`/api/records/1/image` JPEG 可解码、真实文本+截图多次到达用户 QQ（确认）、
+**运行时采集窗口实战：真实私聊消息抓获 c2c openid**、目标切换→重启→仍生效、
+窗口 60s 自动关闭、切换回单聊后推送回归 ok。三轮独立评审
+（bf101e4、4a1e881、d01bad2 范围）全部必改+建议项修复并复测。
 
 **Journey log** —
 1. botgo 内置老 token 端点 bots.qq.com 对本应用报 100002；现行文档端点为
    api.bot.qq.com，经 `constant.TokenDomain` 覆盖一行解决。
-2. 原定 openid 抓取走临时 Cloudflare Worker，因所在网络污染 workers.dev 不可达
-   → 改网关内置 `-bootstrap` WS 模式（连通性冒烟后转向），Worker 保留备用。
+2. openid 采集两次改道：原定临时 Cloudflare Worker 因网络污染 workers.dev 不可达
+   → `-bootstrap` 模式；运行时窗口再次验证 **botgo session manager 无停止 API、
+   无法保证窗口外零接收** → 最终手写受控 WS 客户端（Identify 单写者顺序 + ctx 关连接）。
 3. botgo 的 `WSPayload.RawMessage` 是整帧 JSON，openid 藏在 `d` 内；首版按顶层
    解析空手而归，帧解包后实战抓获。
 4. 本机 MIMO_NODE 实为 Electron（versions.electron=41.7.2），yargs hideBin 少切
    一位导致 wrangler 参数错乱；换独立 Node（%LOCALAPPDATA%\NodePortable）解决。
-5. NAS 宿主 ./data 被 docker 建成 root 属主、容器 uid10001 写不进崩溃循环
-   → chown 修复；二轮评审揪出 gorilla 并发写 panic 风险与持锁慢写，重写为
-   每连接发送队列 + hello 先写后注册。
+5. 运维坑二连：NAS 宿主 ./data 被 docker 建成 root 属主 vs 容器 uid10001 写不进
+   → chown；三轮评审累计揪出 gorilla 并发写 panic、持锁慢写、seq 数据竞争、
+   状态文件 RMW 交叉等，分别以每连接队列、原子 seq、状态互斥锁收敛。
 ## [S1] Problem
 
 三月七小助手等本地程序需要把运行结果（文本 + 截图）推送到用户的 QQ。可选渠道中，
@@ -259,5 +264,5 @@ WebSocket 入站、签名校验、消息模板页、渠道管理页（仅 QQ 单
 - [x] T8: 交付调用方配置 — acceptance: 给出三月七小助手 Webhook 渠道完整配置（URL/headers/body 模板）并经一次真实推送验证 (covers: S1; depends: T7)
 - [x] T9: Web UI 实现 — acceptance: 五页 + WS 实时可用；记录页四列/截断/图缩略符合 S4；域名可保存；`go build/vet/test` 全绿 (covers: S4; depends: T1,T2,T3,T6)
 - [x] T10: UI 挂卷部署与端到端验证 — acceptance: NAS 挂 `./data` 卷后真实推送实时入表且图片可点开；容器重启记录/日志/域名仍在 (covers: S4; depends: T9)
-- [ ] T11: 运行时 OpenID 采集与目标切换 — acceptance: `POST /api/openid/listen` 60s 窗口内私聊/@/拉群均可抓取并经 WS 实时广播；`PUT /api/target` 切换单聊/群组后新推送走新目标，重启后仍生效 (covers: S2 运行时采集; depends: T9)
-- [ ] T12: 系统配置页指引与采集 UI — acceptance: 四字段接入指引可复制；监听按钮/倒计时/抓取结果/目标切换 UI 与后端联调通过 (covers: S4 系统配置; depends: T11)
+- [x] T11: 运行时 OpenID 采集与目标切换 — acceptance: `POST /api/openid/listen` 60s 窗口内私聊/@/拉群均可抓取并经 WS 实时广播；`PUT /api/target` 切换单聊/群组后新推送走新目标，重启后仍生效 (covers: S2 运行时采集; depends: T9)
+- [x] T12: 系统配置页指引与采集 UI — acceptance: 四字段接入指引可复制；监听按钮/倒计时/抓取结果/目标切换 UI 与后端联调通过 (covers: S4 系统配置; depends: T11)
