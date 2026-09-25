@@ -32,6 +32,22 @@ func main() {
 		log.Fatalf("配置错误: %v", err)
 	}
 
+	// 数据层：记录持久化 + WS hub + 日志落盘（需在业务日志前就位）
+	dataDir := getenvDefault("DATA_DIR", "data")
+	store, err := NewRecordStore(dataDir)
+	if err != nil {
+		log.Fatalf("初始化记录存储失败: %v", err)
+	}
+	hub := NewHub()
+	if err := setupLog(dataDir, hub); err != nil {
+		log.Fatalf("初始化日志文件失败: %v", err)
+	}
+	store.SetOnChange(func(rec Record) {
+		hub.Broadcast("record", rec)
+		hub.Broadcast("stats", store.Stats())
+	})
+	ui := newWebUI(cfg, store, hub, dataDir)
+
 	// botgo token source：atomic 缓存 + singleflight + 后台自动刷新
 	tokenSource := token.NewQQBotTokenSource(&token.QQBotCredentials{
 		AppID:     cfg.AppID,
@@ -44,7 +60,7 @@ func main() {
 	qq := NewQQClient(cfg, tokenSource, 60*time.Second)
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           newMux(cfg, qq),
+		Handler:           newMux(cfg, qq, ui),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
