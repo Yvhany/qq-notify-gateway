@@ -1,0 +1,17 @@
+# secrets
+.env
+.dev.vars
+*.pem
+
+# build
+/qq-notify-gateway
+/bin/
+dist/
+
+# go
+vendor/
+
+# editor / os
+.idea/
+.vscode/
+.DS_Store
