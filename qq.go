@@ -116,7 +116,7 @@ func parseQQResponse(resp *http.Response, out any) error {
 		}
 		return e
 	}
-	if decoded && envelope.Code != 0 && envelope.Code != 200 {
+	if decoded && envelope.Code != 0 {
 		return &QQAPIError{Status: resp.StatusCode, Code: envelope.Code, Message: envelope.Message, TraceID: traceID}
 	}
 	if out != nil && len(data) > 0 {

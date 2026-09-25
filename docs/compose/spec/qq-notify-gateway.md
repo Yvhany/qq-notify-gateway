@@ -32,9 +32,11 @@ qq-notify-gateway (Go 单进程, NAS Docker)
 QQ 单聊/群聊  ← 文本(msg_type 0) + 截图(msg_type 7, 分片上传后发)
 ```
 
-一次性 openid 获取（不进入主程序）：临时 Cloudflare Worker（`contrib/bootstrap-worker/`）
-接收开放平台 webhook 回调，Ed25519 验签后提取 `user_openid`/`group_openid` 展示给
-用户，抓完即废弃；平台侧随后关闭回调。主网关永不监听 QQ 事件。
+一次性 openid 获取（不进入主运行模式）：**网关内置 `-bootstrap` 开关**——临时以
+botgo WS 长连接（`wss://api.sgroup.qq.com/websocket`）监听，抓到 `user_openid` /
+`group_openid` 打印后进程退出；主运行模式永不监听 QQ 事件。原计划的临时
+Cloudflare Worker（`contrib/bootstrap-worker/`）因所在网络对 `workers.dev` 污染
+不可达而降级为备用方案（代码与已部署实例保留）。
 
 ### 入站契约
 
@@ -83,16 +85,21 @@ QQ 单聊/群聊  ← 文本(msg_type 0) + 截图(msg_type 7, 分片上传后发
 - **顺序**：先发文本消息，再发图片消息（两条主动消息；单关系 20/qpm、日上限
   1000 条，余量充足）。任一步失败即整体 502。
 
-### bootstrap Worker（一次性）
+### 一次性 openid 获取（`-bootstrap` WS 模式；Worker 备用）
 
-- 位置 `contrib/bootstrap-worker/`（wrangler，纯 JS，依赖 `@noble/ed25519`）。
-- `POST /<随机路径>`：校验 `X-Signature-Ed25519`/`X-Signature-Timestamp`（AppSecret
-  重复填充至 ≥32 字节作 seed，验证 `timestamp+body` 签名）；`plain_token` 挑战请求
-  按官方握手回签；`C2C_MESSAGE_CREATE` → 存 `user_openid`，`GROUP_AT_MESSAGE_CREATE`
-  → 存 `group_openid`。
-- `GET /`：展示内存中最近抓到的 openid（附 `wrangler tail` 实时日志兜底）。
-- `QQ_CLIENT_SECRET` 以 `wrangler secret` 注入，**不进仓库**；随机 URL 路径防枚举。
-- 抓取后：openid 写入 NAS `.env`，平台侧移除回调地址，删除 Worker。
+- **主路线**：`qq-notify-gateway -bootstrap`（仅需 `QQ_APP_ID`/`QQ_SECRET`）——
+  botgo 事件链路建立 WS 长连接，注册 C2C/群@事件 handler；从事件帧 `d` 载荷解析
+  `author.user_openid` / `group_openid`，打印 `CAPTURED type=… id=…` 后退出。
+  实战约束与结论：`api.sgroup.qq.com` 与 `wss://api.sgroup.qq.com/websocket`
+  直连可达；两事件共用 intent 位 `IntentGroupMessages(33554432)`。
+- **备用路线**（已部署，暂不可达）：`contrib/bootstrap-worker/`（wrangler，纯 JS，
+  依赖 `@noble/ed25519`）——`POST /<随机路径>` 校验 `X-Signature-Ed25519`
+  （AppSecret 重复填充至 ≥32 字节作 seed，验证 `timestamp+body`）并回签
+  `plain_token` 挑战；openid 存内存、`GET /<随机路径>` 读取。`QQ_CLIENT_SECRET`
+  与 `PATH_SECRET` 经 `wrangler secret` 注入，不进仓库。启用前提：可达的
+  回调域名（workers.dev 在当前网络被污染）。
+- 已完成：`-bootstrap` 实战抓获 `user_openid=CFC6F9FF7E8132B866AF5483400C1CE2`
+  并写入 NAS `.env`；用完后应从开放平台移除任何临时回调配置。
 
 ### Docker 与 NAS 部署
 
@@ -115,7 +122,8 @@ QQ 单聊/群聊  ← 文本(msg_type 0) + 截图(msg_type 7, 分片上传后发
 ## [S3] Out of Scope
 
 - NapCat / OneBot / Go-cqhttp / Apprise / message-pusher 等个人号或聚合方案。
-- 主程序接收 QQ 事件、WebSocket、频道(guild)消息、被动回复。
+- **主运行模式**接收 QQ 事件、WebSocket、频道(guild)消息、被动回复
+  （`-bootstrap` 一次性模式为唯一例外，抓完即退）。
 - 消息持久化队列/重试存储（失败即 502，由调用方决定重试）。
 - 多目标路由、@特定成员、markdown/键盘等富文本。
 - Cloudflare 中转主链路（Worker 仅用于一次性 bootstrap）。
@@ -128,7 +136,7 @@ QQ 单聊/群聊  ← 文本(msg_type 0) + 截图(msg_type 7, 分片上传后发
 - [ ] T2: QQ 调用层文本推送 — acceptance: botgo token source 接入；msg_type 0 payload 构造与错误处理有 mock 测试通过 (covers: S2 QQ调用层/文本; depends: T1)
 - [ ] T3: 分片上传与图片推送 — acceptance: mock 服务器上完整走通 prepare→PUT→part_finish→merge→msg_type 7，单聊/群聊路径可切换，异常路径测试通过 (covers: S2 图片; depends: T2)
 - [ ] T4: Docker 构建与 compose — acceptance: `docker compose config` 校验通过；Dockerfile 多阶段、非 root、`.env.example` 齐全 (covers: S2 Docker与NAS部署; depends: T1)
-- [ ] T5: bootstrap Worker — acceptance: wrangler 部署到 Cloudflare，用户给机器人发消息后 GET 页面/日志显示 openid (covers: S2 bootstrap Worker)
+- [ ] T5: 一次性 openid 获取 — acceptance: `-bootstrap` WS 模式实战抓到 c2c openid（✅ 已完成，`CAPTURED type=c2c`）；Worker 已部署保留备用 (covers: S2 一次性 openid 获取)
 - [ ] T6: 本地验证 — acceptance: `go build/vet/test ./...` 全绿并记录输出 (covers: S2 测试边界; depends: T1,T2,T3)
 - [ ] T7: NAS 部署与真实推送 — acceptance: NAS 上仅新增本项目目录与 `qq-notify-gateway` 容器；手机收到真实文本与截图消息 (covers: S1,S2; depends: T4,T5,T6)
 - [ ] T8: 交付调用方配置 — acceptance: 给出三月七小助手 Webhook 渠道完整配置（URL/headers/body 模板）并经一次真实推送验证 (covers: S1; depends: T7)

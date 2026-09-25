@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,7 +33,8 @@ func writeJSON(w http.ResponseWriter, status int, payload map[string]any) {
 }
 
 func handleNotify(cfg Config, qq *QQClient, w http.ResponseWriter, r *http.Request) {
-	if cfg.GatewayToken != "" && r.Header.Get("X-Gateway-Token") != cfg.GatewayToken {
+	if cfg.GatewayToken != "" &&
+		subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Gateway-Token")), []byte(cfg.GatewayToken)) != 1 {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid gateway token"})
 		return
 	}

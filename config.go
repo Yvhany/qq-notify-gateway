@@ -34,7 +34,7 @@ func LoadConfig() (Config, error) {
 		TargetOpenID: strings.TrimSpace(os.Getenv("TARGET_OPENID")),
 		ListenAddr:   getenvDefault("LISTEN_ADDR", ":8080"),
 		Sandbox:      strings.EqualFold(strings.TrimSpace(os.Getenv("QQ_SANDBOX")), "true"),
-		GatewayToken: os.Getenv("GATEWAY_TOKEN"),
+		GatewayToken: strings.TrimSpace(os.Getenv("GATEWAY_TOKEN")),
 	}
 	explicitBase := strings.TrimSpace(os.Getenv("QQ_API_BASE"))
 	if explicitBase != "" {
