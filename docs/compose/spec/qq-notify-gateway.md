@@ -1,15 +1,46 @@
 ---
 feature: qq-notify-gateway
-status: in-progress
+status: delivered
 updated: 2026-09-26
 branch: feat/qq-webhook-gateway
-commits:
+commits: e187523..4a1e881
 ---
 
 # QQ Notify Gateway
 
 ## Report
 
+**What was built** — 单程序 Go 网关 qq-notify-gateway：`POST /notify` 接收
+{title, content, image(base64)}，经 botgo token source（api.bot.qq.com 官方端点、
+自动刷新）调用 QQ 开放平台 API v2，先发文本（msg_type 0）再经四步分片上传
+（prepare → 预签名 PUT → part_finish → 合并）发图（msg_type 7），单聊/群聊
+双路径；`-bootstrap` 模式用 WS 长连接一次性抓取 openid。内置按用户模板裁剪的
+Deliver 风格 Web UI（embed 同端口）：数据看板（真实统计+SVG 趋景+WS 事件流）、
+高密度推送记录（编号/截断内容/缩略图/来源/状态）、WebHook 接入（公网域名可编辑）、
+系统日志（持久化+WS 实时）、系统配置只读；记录/日志/域名全部落盘于 DATA_DIR 卷，
+WS 采用每连接队列且仅在页面可见时建立。部署于 NAS 单容器（18080），不触碰其他项目。
+
+**Verification** — `go build/vet ./...` PASS；`go test -count=1 ./...` PASS（终验
+ok qq-notify-gateway 1.360s，覆盖配置/入站/分片上传/记录存储/hub 并发）；前端
+`vm.Script` 语法 PASS；NAS 实测：`docker compose config` OK、UI GET 200、
+`/api/stats|records|config|logs|webhook` 全通、webhook PUT/GET 往返、
+WS E2E（hello+record+stats 实时帧）×2 PASS、`/api/records/1/image` 200 JPEG
+可解码、`docker compose restart` 后记录与域名仍在、`docker logs` 可见应用日志、
+真实文本+截图多次到达用户 QQ（用户确认“已经好了”）。两轮独立评审
+（bf101e4、4a1e881）必改项全部修复并复测。
+
+**Journey log** —
+1. botgo 内置老 token 端点 bots.qq.com 对本应用报 100002；现行文档端点为
+   api.bot.qq.com，经 `constant.TokenDomain` 覆盖一行解决。
+2. 原定 openid 抓取走临时 Cloudflare Worker，因所在网络污染 workers.dev 不可达
+   → 改网关内置 `-bootstrap` WS 模式（连通性冒烟后转向），Worker 保留备用。
+3. botgo 的 `WSPayload.RawMessage` 是整帧 JSON，openid 藏在 `d` 内；首版按顶层
+   解析空手而归，帧解包后实战抓获。
+4. 本机 MIMO_NODE 实为 Electron（versions.electron=41.7.2），yargs hideBin 少切
+   一位导致 wrangler 参数错乱；换独立 Node（%LOCALAPPDATA%\NodePortable）解决。
+5. NAS 宿主 ./data 被 docker 建成 root 属主、容器 uid10001 写不进崩溃循环
+   → chown 修复；二轮评审揪出 gorilla 并发写 panic 风险与持锁慢写，重写为
+   每连接发送队列 + hello 先写后注册。
 ## [S1] Problem
 
 三月七小助手等本地程序需要把运行结果（文本 + 截图）推送到用户的 QQ。可选渠道中，
@@ -183,7 +214,8 @@ Cloudflare Worker（`contrib/bootstrap-worker/`）因所在网络对 `workers.de
     页面卸载即 `close()`；服务端读循环感知断开并注销——无人观看时无连接。
   - 初次进入以 `GET /api/logs?n=` 拉尾部，之后仅靠 WS 追加。
 - **鉴权**：与 `/notify` 相同（不加 UI 专属鉴权；用户以反代登录/防火墙兜底）。
-- **compose 变更**：`environment: DATA_DIR=/data` + `volumes: ["./data:/data"]`。
+- **compose 变更**：`environment: {DATA_DIR: /data, TZ: Asia/Shanghai}` +
+  `volumes: ["./data:/data"]`。
 
 ### 明确不做（模板有但裁掉）
 
@@ -191,13 +223,13 @@ WebSocket 入站、签名校验、消息模板页、渠道管理页（仅 QQ 单
 已覆盖）、CSV 导出、ECharts/任何 CDN 依赖、在线编辑系统配置（域名除外）。
 
 ## Tasks
-- [ ] T1: 网关骨架与入站层 — acceptance: 配置/env 加载、`POST /notify`（含鉴权、base64 解析、20MB 上限）有单测通过，`go vet` 干净 (covers: S2 入站契约/配置)
-- [ ] T2: QQ 调用层文本推送 — acceptance: botgo token source 接入；msg_type 0 payload 构造与错误处理有 mock 测试通过 (covers: S2 QQ调用层/文本; depends: T1)
-- [ ] T3: 分片上传与图片推送 — acceptance: mock 服务器上完整走通 prepare→PUT→part_finish→merge→msg_type 7，单聊/群聊路径可切换，异常路径测试通过 (covers: S2 图片; depends: T2)
-- [ ] T4: Docker 构建与 compose — acceptance: `docker compose config` 校验通过；Dockerfile 多阶段、非 root、`.env.example` 齐全 (covers: S2 Docker与NAS部署; depends: T1)
-- [ ] T5: 一次性 openid 获取 — acceptance: `-bootstrap` WS 模式实战抓到 c2c openid（✅ 已完成，`CAPTURED type=c2c`）；Worker 已部署保留备用 (covers: S2 一次性 openid 获取)
-- [ ] T6: 本地验证 — acceptance: `go build/vet/test ./...` 全绿并记录输出 (covers: S2 测试边界; depends: T1,T2,T3)
-- [ ] T7: NAS 部署与真实推送 — acceptance: NAS 上仅新增本项目目录与 `qq-notify-gateway` 容器；手机收到真实文本与截图消息 (covers: S1,S2; depends: T4,T5,T6)
-- [ ] T8: 交付调用方配置 — acceptance: 给出三月七小助手 Webhook 渠道完整配置（URL/headers/body 模板）并经一次真实推送验证 (covers: S1; depends: T7)
-- [ ] T9: Web UI 实现 — acceptance: 五页 + WS 实时可用；记录页四列/截断/图缩略符合 S4；域名可保存；`go build/vet/test` 全绿 (covers: S4; depends: T1,T2,T3,T6)
-- [ ] T10: UI 挂卷部署与端到端验证 — acceptance: NAS 挂 `./data` 卷后真实推送实时入表且图片可点开；容器重启记录/日志/域名仍在 (covers: S4; depends: T9)
+- [x] T1: 网关骨架与入站层 — acceptance: 配置/env 加载、`POST /notify`（含鉴权、base64 解析、20MB 上限）有单测通过，`go vet` 干净 (covers: S2 入站契约/配置)
+- [x] T2: QQ 调用层文本推送 — acceptance: botgo token source 接入；msg_type 0 payload 构造与错误处理有 mock 测试通过 (covers: S2 QQ调用层/文本; depends: T1)
+- [x] T3: 分片上传与图片推送 — acceptance: mock 服务器上完整走通 prepare→PUT→part_finish→merge→msg_type 7，单聊/群聊路径可切换，异常路径测试通过 (covers: S2 图片; depends: T2)
+- [x] T4: Docker 构建与 compose — acceptance: `docker compose config` 校验通过；Dockerfile 多阶段、非 root、`.env.example` 齐全 (covers: S2 Docker与NAS部署; depends: T1)
+- [x] T5: 一次性 openid 获取 — acceptance: `-bootstrap` WS 模式实战抓到 c2c openid（✅ 已完成，`CAPTURED type=c2c`）；Worker 已部署保留备用 (covers: S2 一次性 openid 获取)
+- [x] T6: 本地验证 — acceptance: `go build/vet/test ./...` 全绿并记录输出 (covers: S2 测试边界; depends: T1,T2,T3)
+- [x] T7: NAS 部署与真实推送 — acceptance: NAS 上仅新增本项目目录与 `qq-notify-gateway` 容器；手机收到真实文本与截图消息 (covers: S1,S2; depends: T4,T5,T6)
+- [x] T8: 交付调用方配置 — acceptance: 给出三月七小助手 Webhook 渠道完整配置（URL/headers/body 模板）并经一次真实推送验证 (covers: S1; depends: T7)
+- [x] T9: Web UI 实现 — acceptance: 五页 + WS 实时可用；记录页四列/截断/图缩略符合 S4；域名可保存；`go build/vet/test` 全绿 (covers: S4; depends: T1,T2,T3,T6)
+- [x] T10: UI 挂卷部署与端到端验证 — acceptance: NAS 挂 `./data` 卷后真实推送实时入表且图片可点开；容器重启记录/日志/域名仍在 (covers: S4; depends: T9)
