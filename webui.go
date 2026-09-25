@@ -116,14 +116,19 @@ func (u *webUI) handleWebhookGet(w http.ResponseWriter, _ *http.Request) {
 
 // handleWebhookPut 保存公网域名（仅 http/https，空值表示清除）。
 func (u *webUI) handleWebhookPut(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	var req struct {
 		URL string `json:"url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "JSON 解析失败"})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "请求体无效或过大"})
 		return
 	}
 	req.URL = strings.TrimSpace(req.URL)
+	if len(req.URL) > 512 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "URL 过长（>512）"})
+		return
+	}
 	if req.URL != "" {
 		parsed, err := url.Parse(req.URL)
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
@@ -165,8 +170,8 @@ func (u *webUI) handleIndex(w http.ResponseWriter, r *http.Request) {
 	http.FileServer(http.FS(sub)).ServeHTTP(w, r)
 }
 
-// tailFile 取文件末尾 n 行（读取末尾至多 512KB）。
-func tailFile(path string, n int) []string {
+// tailFile 取文件末尾 maxLines 行（读取末尾至多 512KB）。
+func tailFile(path string, maxLines int) []string {
 	f, err := os.Open(path)
 	if err != nil {
 		return []string{}
@@ -183,19 +188,24 @@ func tailFile(path string, n int) []string {
 		start = size - window
 	}
 	buf := make([]byte, size-start)
-	if _, err := f.ReadAt(buf, start); err != nil && len(buf) == 0 {
+	nr, err := f.ReadAt(buf, start)
+	if nr == 0 {
 		return []string{}
 	}
+	buf = buf[:nr] // 短读截断，避免半缓冲混入 NUL
 	lines := strings.Split(string(buf), "\n")
-	// 去掉末尾空行
 	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
 		lines = lines[:len(lines)-1]
 	}
+	// start 落在行中间时首行才是残行（前一字符非换行），需丢弃
 	if start > 0 && len(lines) > 0 {
-		lines = lines[1:] // 首行可能是被截断的半行
+		prev := make([]byte, 1)
+		if _, err := f.ReadAt(prev, start-1); err == nil && prev[0] != '\n' {
+			lines = lines[1:]
+		}
 	}
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
 	}
 	return lines
 }

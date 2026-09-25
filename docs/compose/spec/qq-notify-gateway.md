@@ -176,7 +176,9 @@ Cloudflare Worker（`contrib/bootstrap-worker/`）因所在网络对 `workers.de
   `{"webhook_url":"https://…/notify"}`（仅用于 UI 展示/复制，默认空）。
 - **系统配置**：`GET /api/config`（只读全量字段）。
 - **WebSocket**：`GET /api/ws`（升级），服务端单向推送 JSON 行
-  `{"type":"record"|"log"|"stats"|"hello", "data":…}`。
+  `{"type":"record"|"log"|"stats"|"webhook"|"hello", "data":…}`。
+  实现约束：每连接独立发送队列 + 唯一 writer goroutine（规避 gorilla 并发写
+  panic，慢客户端队列满即踢）；hello 帧在连接注册前写入。
   - 连接生命周期：前端仅在页面**可见**时保持连接，`visibilitychange` 隐藏或
     页面卸载即 `close()`；服务端读循环感知断开并注销——无人观看时无连接。
   - 初次进入以 `GET /api/logs?n=` 拉尾部，之后仅靠 WS 追加。

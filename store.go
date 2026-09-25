@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -95,9 +97,14 @@ func NewRecordStore(dir string) (*RecordStore, error) {
 		all = all[len(all)-maxRecordsInMemory:]
 	}
 	s.records = all
-	if len(all) > 0 {
-		s.nextID = all[len(all)-1].ID + 1
+	// nextID 取历史最大值+1（JSONL 行序理论上与写入序一致，但以 max 兜底防撞号）
+	var maxID uint64
+	for _, r := range all {
+		if r.ID > maxID {
+			maxID = r.ID
+		}
 	}
+	s.nextID = maxID + 1
 	s.pruneImages()
 	return s, nil
 }
@@ -158,17 +165,32 @@ func (s *RecordStore) ImagePath(id uint64) string {
 	return matches[0]
 }
 
-// pruneImages 仅保留最新 maxImagesRetained 张图片文件。
+// pruneImages 仅保留最新 maxImagesRetained 张图片文件（按记录 id 数值排序）。
 func (s *RecordStore) pruneImages() {
 	files, _ := filepath.Glob(filepath.Join(s.dir, "images", "*"))
 	if len(files) <= maxImagesRetained {
 		return
 	}
-	// 按文件名（=记录id）排序，旧的在前
-	sortPaths(files)
+	sortByImageID(files)
 	for _, p := range files[:len(files)-maxImagesRetained] {
 		_ = os.Remove(p)
 	}
+}
+
+// sortByImageID 按文件名前缀的数值 id 升序（忽略扩展名差异）。
+func sortByImageID(paths []string) {
+	idOf := func(p string) uint64 {
+		base := filepath.Base(p)
+		if i := strings.IndexByte(base, '.'); i > 0 {
+			base = base[:i]
+		}
+		id, err := strconv.ParseUint(base, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return id
+	}
+	sort.Slice(paths, func(i, j int) bool { return idOf(paths[i]) < idOf(paths[j]) })
 }
 
 // List 返回记录（新→旧），支持 offset/limit。
@@ -250,23 +272,4 @@ func (s *RecordStore) Stats() Stats {
 		st.LastStatus = s.records[n-1].Status
 	}
 	return st
-}
-
-// sortPaths 按文件名字典序排序（id 数字前缀在位数一致时即时间序；
-// 位数不同时用长度比较兜底）。
-func sortPaths(paths []string) {
-	for i := 1; i < len(paths); i++ {
-		for j := i; j > 0 && pathLess(paths[j], paths[j-1]); j-- {
-			paths[j], paths[j-1] = paths[j-1], paths[j]
-		}
-	}
-}
-
-func pathLess(a, b string) bool {
-	a = filepath.Base(a)
-	b = filepath.Base(b)
-	if len(a) != len(b) {
-		return len(a) < len(b)
-	}
-	return a < b
 }
