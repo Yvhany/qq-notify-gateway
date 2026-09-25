@@ -18,7 +18,19 @@ type notifyRequest struct {
 	Source  string `json:"source"` // 可选来源标识，缺省 WebHook
 }
 
-// newMux 组装网关 HTTP 路由：入站推送 + Web UI。
+// routeFilter 在共享 mux 之上做端口级路由裁剪：
+// API 端口只放行 /notify，UI 端口屏蔽 /notify（防打错口造成“假成功”）。
+func routeFilter(next http.Handler, allow func(*http.Request) bool) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !allow(r) {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// newMux 组装网关 HTTP 路由：入站推送 + Web UI（两个监听器共用）。
 func newMux(tok *tokenState, qq *QQClient, ui *webUI) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /notify", func(w http.ResponseWriter, r *http.Request) {

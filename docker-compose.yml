@@ -6,8 +6,10 @@ services:
     environment:
       DATA_DIR: /data
       TZ: Asia/Shanghai
+      UI_LISTEN_ADDR: ":8081"
     volumes:
       - ./data:/data
     ports:
-      - "18080:8080"
+      - "18080:8080"   # API：仅 POST /notify（token 校验），反代免登录放行本口
+      - "18081:8081"   # Web UI：页面/记录/日志/WS，反代登录保护本口
     restart: unless-stopped

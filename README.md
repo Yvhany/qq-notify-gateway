@@ -5,7 +5,9 @@ Webhook 网关：接收外部 HTTP POST 通知（文本 + base64 图片），单
 - 纯出站调用 QQ OpenAPI，主运行模式不接收 QQ 事件（openid 通过一次性 `-bootstrap` 获取）
 - AccessToken 使用 `tencent-connect/botgo` 的 token source，自动缓存与刷新
 - 图片走官方推荐的分片上传（`upload_prepare` → 预签名 PUT → `upload_part_finish` → 合并 → `msg_type:7`）
-- 内嵌 Web UI（同端口）：数据看板 / 消息推送记录 / WebHook 接入（公网域名可编辑）/ 系统日志 / 系统配置
+- **双端口**：API 口 `18080` 仅 `POST /notify`（token 校验，反代免登录放行）；
+  UI 口 `18081` 承载 Web UI（数据看板 / 推送记录 / WebHook 接入 / 系统日志 /
+  系统配置），由反代登录保护，两口共享记录与 WS 实时流
 - 记录与日志持久化到数据卷（`./data`），WebSocket 仅在页面可见时实时推送
 - Docker 部署于 NAS，仅新增本项目容器，不改动 NAS 上其他项目
 
@@ -20,9 +22,11 @@ curl -X POST http://<nas>:18080/notify \
   -H 'Content-Type: application/json' \
   -d '{"title":"测试","content":"来自网关"}'
 
-# 打开 Web UI
-# http://<nas>:18080/
+# 打开 Web UI（UI 口）
+# http://<nas>:18081/
 ```
+
+> 推送请求必须带请求头 `X-Gateway-Token`（值见 Web UI 系统配置页，可复制/重置）。
 
 ## Web UI
 
@@ -42,7 +46,8 @@ WS 连接仅在页面可见时建立，隐藏/关闭即断开；服务端无客�
 
 | 设置项 | 填写值 |
 |---|---|
-| 接收地址 | `http://192.168.1.21:18080/notify`（反代后改公网域名，并同步到 Web UI「公网域名」） |
+| 接收地址 | `http://192.168.1.21:18080/notify`（API 口；反代后改公网域名，并同步到 Web UI「公网域名」） |
+| 请求头 | `{"X-Gateway-Token":"<系统配置页复制>"}`（必填，可在指引卡重置） |
 | 请求方法 | 留空（默认 POST；网关仅接受 POST） |
 | 请求头 | 留空（未启用 GATEWAY_TOKEN；Content-Type 由小助手自动补） |
 | 请求体 | **必填**：`{"title":"{title}","content":"{content}","image":"{image}"}` |

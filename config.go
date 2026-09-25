@@ -12,7 +12,8 @@ type Config struct {
 	Secret       string
 	TargetType   string // c2c | group
 	TargetOpenID string
-	ListenAddr   string
+	ListenAddr   string // API（仅 POST /notify，token 校验）
+	UIListenAddr string // Web UI + /api + WS（由反代登录保护）；空=禁用
 	APIBase      string
 	Sandbox      bool
 	GatewayToken string
@@ -33,6 +34,7 @@ func LoadConfig() (Config, error) {
 		TargetType:   strings.ToLower(strings.TrimSpace(os.Getenv("TARGET_TYPE"))),
 		TargetOpenID: strings.TrimSpace(os.Getenv("TARGET_OPENID")),
 		ListenAddr:   getenvDefault("LISTEN_ADDR", ":8080"),
+		UIListenAddr: getenvDefault("UI_LISTEN_ADDR", ":8081"),
 		Sandbox:      strings.EqualFold(strings.TrimSpace(os.Getenv("QQ_SANDBOX")), "true"),
 		GatewayToken: strings.TrimSpace(os.Getenv("GATEWAY_TOKEN")),
 	}
