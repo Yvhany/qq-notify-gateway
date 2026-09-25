@@ -18,13 +18,19 @@ func main() {
 	// 官方文档现行 token 端点为 api.bot.qq.com；老的 bots.qq.com 对新应用返回 100002
 	constant.TokenDomain = "https://api.bot.qq.com"
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// 一次性模式：抓取 openid 后退出
+	if len(os.Args) > 1 && (os.Args[1] == "-bootstrap" || os.Args[1] == "--bootstrap") {
+		runBootstrap(ctx)
+		return
+	}
+
 	cfg, err := LoadConfig()
 	if err != nil {
 		log.Fatalf("配置错误: %v", err)
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	// botgo token source：atomic 缓存 + singleflight + 后台自动刷新
 	tokenSource := token.NewQQBotTokenSource(&token.QQBotCredentials{
