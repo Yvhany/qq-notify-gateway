@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QQ Notify Gateway · Deliver 风格</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231677ff'/%3E%3Cpath d='M8 16h4l3-6 4 12 3-6h2' stroke='%23fff' stroke-width='2.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+:root{
+  --primary:#1677ff; --primary-weak:#e6f4ff;
+  --bg:#f5f6f8; --card:#ffffff; --line:#f0f0f0; --text:#1f2329; --text-2:#646a73; --text-3:#8a919f;
+  --success:#52c41a; --success-bg:#f6ffed; --warn:#faad14; --warn-bg:#fffbe6; --err:#ff4d4f; --err-bg:#fff2f0;
+  --sider-text:#5a6270; --header-h:56px; --sider-w:208px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Arial,sans-serif;background:var(--bg);color:var(--text);font-size:14px;-webkit-font-smoothing:antialiased}
+a{color:var(--primary);text-decoration:none}
+.icon{width:18px;height:18px;vertical-align:-3px;fill:currentColor}
+.app{display:flex;flex-direction:column;height:100vh;min-height:640px}
+.header{height:var(--header-h);background:#fff;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:16px;padding:0 20px;position:relative;z-index:10}
+.logo{display:flex;align-items:center;gap:10px;flex:0 0 auto}
+.logo-badge{width:30px;height:30px;border-radius:7px;background:linear-gradient(135deg,#1677ff,#36a3ff);display:flex;align-items:center;justify-content:center;color:#fff}
+.logo-badge svg{width:18px;height:18px}
+.logo-name{font-size:16px;font-weight:600;letter-spacing:.3px}
+.breadcrumb{font-size:13px;color:var(--text-3)}
+.breadcrumb b{color:var(--text);font-weight:500}
+.header-right{margin-left:auto;display:flex;align-items:center;gap:14px;color:var(--text-2)}
+.ws-dot{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-2)}
+.ws-dot i{width:8px;height:8px;border-radius:50%;background:#bfbfbf;display:inline-block}
+.ws-dot.on i{background:var(--success)}
+.body{flex:1;display:flex;min-height:0}
+.sider{width:var(--sider-w);background:#fff;border-right:1px solid var(--line);padding:12px 8px;overflow-y:auto;flex:0 0 auto}
+.menu-title{font-size:12px;color:var(--text-3);padding:10px 12px 6px;letter-spacing:.5px}
+.menu-item{display:flex;align-items:center;gap:10px;padding:10px 12px;margin:2px 0;border-radius:8px;color:var(--sider-text);cursor:pointer;font-size:14px;transition:.15s}
+.menu-item:hover{background:#f5f6f8;color:var(--text)}
+.menu-item.active{background:var(--primary-weak);color:var(--primary);font-weight:500}
+.main{flex:1;overflow-y:auto;padding:20px 24px 32px}
+.page-head{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px}
+.page-head h1{font-size:22px;font-weight:600}
+.page-head p{color:var(--text-3);margin-top:4px;font-size:13px}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:#fff;color:var(--text);padding:7px 16px;border-radius:8px;font-size:14px;cursor:pointer;transition:.15s}
+.btn:hover{border-color:var(--primary);color:var(--primary)}
+.btn.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+.btn.primary:hover{background:#4096ff;border-color:#4096ff}
+.btn.dashed{border-style:dashed}
+.btn.sm{padding:4px 12px;font-size:12px}
+.stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:16px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px 18px 16px;position:relative;overflow:hidden}
+.stat .label{font-size:13px;color:var(--text-3);display:flex;align-items:center;gap:8px}
+.stat .value{font-size:28px;font-weight:600;margin-top:8px;line-height:1}
+.stat .delta{font-size:12px;color:var(--text-2);margin-top:8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px}
+.card-h{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between}
+.card-h .t{font-size:15px;font-weight:600}
+.card-h .sub{font-size:12px;color:var(--text-3);font-weight:400}
+.card-b{padding:18px}
+.grid-2{display:grid;grid-template-columns:1.6fr 1fr;gap:16px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:#fafafa;color:var(--text-2);font-weight:500;text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:6px 10px;border-bottom:1px solid #f7f7f7;color:var(--text);vertical-align:top}
+tr:hover td{background:#fafcff}
+.badge{display:inline-flex;align-items:center;gap:5px;padding:1px 9px;border-radius:5px;font-size:12px;line-height:20px}
+.badge.s{background:var(--success-bg);color:var(--success);border:1px solid #b7eb8f}
+.badge.e{background:var(--err-bg);color:var(--err);border:1px solid #ffa39e}
+.badge.i{background:var(--primary-weak);color:var(--primary);border:1px solid #91caff}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:var(--text-2)}
+.event-flow{max-height:340px;overflow-y:auto;font-size:13px}
+.flow-row{display:flex;gap:12px;padding:9px 4px;border-bottom:1px dashed #f0f0f0;align-items:flex-start}
+.flow-row:last-child{border-bottom:none}
+.flow-time{color:var(--text-3);font-size:12px;flex:0 0 86px;font-family:ui-monospace,monospace}
+.flow-body{flex:1;min-width:0}
+.flow-source{font-weight:600}
+.flow-source .tag{font-size:11px;color:var(--primary);background:var(--primary-weak);border-radius:4px;padding:0 5px;margin-left:6px}
+.flow-payload{color:var(--text-2);font-size:12px;margin-top:2px;word-break:break-all}
+.endpoint{display:flex;align-items:center;gap:12px;background:#fafafa;border:1px dashed #d9d9d9;border-radius:8px;padding:12px 14px;margin-bottom:12px}
+.endpoint .url{font-family:ui-monospace,monospace;font-size:13px;color:var(--primary);flex:1;word-break:break-all}
+.form-row{display:flex;align-items:center;gap:12px;padding:13px 0;border-bottom:1px solid #f7f7f7;flex-wrap:wrap}
+.form-row .lbl{flex:0 0 160px;color:var(--text-2);font-size:13px}
+.form-row .ctl{flex:1;min-width:220px;display:flex;align-items:center;gap:8px}
+.input{width:100%;border:1px solid #d9d9d9;border-radius:6px;padding:7px 11px;font-size:13px;color:var(--text);background:#fff}
+.input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 2px rgba(22,119,255,.1)}
+pre.code{font-family:ui-monospace,monospace;font-size:12px;background:#fafafa;border:1px solid #f0f0f0;border-radius:8px;padding:14px;overflow-x:auto;line-height:1.7;color:var(--text-2)}
+.log-stream{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.75;background:#111418;color:#c9d1d9;border-radius:8px;padding:14px 16px;height:calc(100vh - 240px);min-height:320px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
+.log-stream .lt{color:#6a737d}
+.log-stream .err{color:#ff7b72}
+.rc-img{display:block;margin-top:6px;max-width:180px;width:100%;height:auto;border:1px solid var(--line);border-radius:6px;cursor:zoom-in;background:#fff}
+.id-cell .num{font-family:ui-monospace,monospace;font-weight:600;color:var(--text)}
+.id-cell .ts{font-size:11px;color:var(--text-3);margin-top:2px;font-family:ui-monospace,monospace}
+.pager{display:flex;justify-content:flex-end;align-items:center;gap:8px;padding-top:12px;color:var(--text-3);font-size:13px}
+.view{display:none}
+.view.on{display:block}
+@media(max-width:1080px){.stat-grid{grid-template-columns:repeat(2,1fr)}.grid-2{grid-template-columns:1fr}}
+@media(max-width:720px){.sider{display:none}.stat-grid{grid-template-columns:1fr}.breadcrumb{display:none}.header{padding:0 12px}.main{padding:14px 14px 28px}}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo">
+      <div class="logo-badge">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h2.5l2.5-5 5 10 2.5-5H20"/></svg>
+      </div>
+      <span class="logo-name">QQ Notify Gateway</span>
+    </div>
+    <div class="breadcrumb">首页 / <b id="crumb">数据看板</b></div>
+    <div class="header-right">
+      <span class="ws-dot" id="wsDot"><i></i>实时断开</span>
+      <span class="mono" id="verLabel">v–</span>
+    </div>
+  </header>
+  <div class="body">
+    <aside class="sider">
+      <div class="menu-title">总览</div>
+      <div class="menu-item active" data-v="dashboard"><svg class="icon" viewBox="0 0 24 24"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>数据看板</div>
+      <div class="menu-title">业务</div>
+      <div class="menu-item" data-v="records"><svg class="icon" viewBox="0 0 24 24"><path d="M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm-6 14H7v-2h6v2zm4-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg>消息推送记录</div>
+      <div class="menu-item" data-v="webhook"><svg class="icon" viewBox="0 0 24 24"><path d="M8 4a4 4 0 0 1 3.9 3.2L8.9 10.8A4 4 0 1 0 8 4zm0 14.2A4 4 0 1 0 8 8a4 4 0 0 0 0 10.2zM16 8a4 4 0 0 1 4 4h-6.4a3.7 3.7 0 0 1 .4-4zM16 12.8h4.5a3.9 3.9 0 0 1-6.5 2.3 3.7 3.7 0 0 1 2-2.3z"/></svg>WebHook 接入</div>
+      <div class="menu-title">系统</div>
+      <div class="menu-item" data-v="logs"><svg class="icon" viewBox="0 0 24 24"><path d="M4 4h16v16H4V4zm2 4v2h12V8H6zm0 4v2h12v-2H6zm0 4v2h8v-2H6z"/></svg>系统日志</div>
+      <div class="menu-item" data-v="settings"><svg class="icon" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>系统配置</div>
+    </aside>
+    <main class="main">
+
+      <!-- 数据看板 -->
+      <section class="view on" id="v-dashboard">
+        <div class="page-head">
+          <div><h1>数据看板</h1><p>入站 WebHook → QQ 官方 API 单向推送的实时状态</p></div>
+          <button class="btn primary" onclick="loadStats();loadRecords(1,true);toast('已刷新')">刷新</button>
+        </div>
+        <div class="stat-grid">
+          <div class="stat"><div class="label">今日推送量</div><div class="value" id="stToday">–</div><div class="delta" id="stTodaySub">加载中…</div></div>
+          <div class="stat"><div class="label">今日成功率</div><div class="value" id="stRate">–</div><div class="delta" id="stRateSub">–</div></div>
+          <div class="stat"><div class="label">累计记录</div><div class="value" id="stTotal">–</div><div class="delta">持久化于数据卷</div></div>
+          <div class="stat"><div class="label">最近状态</div><div class="value" id="stLast" style="font-size:20px">–</div><div class="delta" id="stWs">WS 实时已连接</div></div>
+        </div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-h"><span class="t">近 7 日推送趋势</span><span class="sub">按日聚合 · 真实数据</span></div>
+            <div class="card-b" style="height:280px"><div id="chartTrend" style="width:100%;height:100%"></div></div>
+          </div>
+          <div class="card">
+            <div class="card-h"><span class="t">实时事件流</span><span class="sub">WS 推送 · 最近事件</span></div>
+            <div class="card-b"><div class="event-flow" id="flow"></div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 消息推送记录 -->
+      <section class="view" id="v-records">
+        <div class="page-head">
+          <div><h1>消息推送记录</h1><p>编号 · 消息内容 · 来源 · 状态 — 高密度分页</p></div>
+          <div style="display:flex;gap:10px"><button class="btn" onclick="loadRecords(recPage,true)">刷新</button></div>
+        </div>
+        <div class="card">
+          <div class="card-b" style="padding:12px">
+          <table>
+            <colgroup><col style="width:11%"><col style="width:57%"><col style="width:16%"><col style="width:16%"></colgroup>
+            <thead><tr><th>编号</th><th>消息内容</th><th>来源</th><th>状态</th></tr></thead>
+            <tbody id="recBody"><tr><td colspan="4" style="color:var(--text-3);text-align:center;padding:24px">加载中…</td></tr></tbody>
+          </table>
+          <div class="pager">
+            <button class="btn sm" id="pgPrev" onclick="loadRecords(recPage-1)">‹</button>
+            <span id="pgInfo">1 / 1</span>
+            <button class="btn sm" id="pgNext" onclick="loadRecords(recPage+1)">›</button>
+          </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- WebHook 接入 -->
+      <section class="view" id="v-webhook">
+        <div class="page-head">
+          <div><h1>WebHook 接入</h1><p>入站端点、公网域名（可编辑）与调用方 body 模板</p></div>
+        </div>
+        <div class="card"><div class="card-b">
+          <div class="endpoint"><svg class="icon" style="color:#1677ff" viewBox="0 0 24 24"><path d="M9.4 16.6L4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4zm5.2 0l4.6-4.6-4.6-4.6L16 6l6 6-6 6-1.4-1.4z"/></svg><span class="url" id="epUrl">–</span><span class="badge s">在线</span></div>
+          <div class="form-row" style="border-top:1px solid #f7f7f7;padding-top:14px">
+            <div class="lbl">公网域名（反代后）</div>
+            <div class="ctl">
+              <input class="input" id="whInput" placeholder="https://notify.example.com/notify">
+              <button class="btn primary" style="white-space:nowrap" onclick="saveWebhook()">保存</button>
+            </div>
+          </div>
+          <div class="card-h" style="padding:14px 0 8px;border:none"><span class="t" style="font-size:14px">三月七小助手 body 模板</span><button class="btn sm" onclick="copyTpl()">复制模板</button></div>
+          <pre class="code" id="tplBlock">{"title":"{title}","content":"{content}","image":"{image}"}</pre>
+          <div class="card-h" style="padding:14px 0 8px;border:none"><span class="t" style="font-size:14px">最近事件</span></div>
+          <div class="event-flow" id="whFlow" style="max-height:260px"></div>
+        </div></div>
+      </section>
+
+      <!-- 系统日志 -->
+      <section class="view" id="v-logs">
+        <div class="page-head">
+          <div><h1>系统日志</h1><p>持久化于数据卷 logs/gateway.log · 页面可见时 WS 实时追加</p></div>
+          <div style="display:flex;gap:10px">
+            <button class="btn" onclick="loadLogs()">重新加载</button>
+            <button class="btn" onclick="clearLogView()">清空视图</button>
+          </div>
+        </div>
+        <div class="log-stream" id="logBox">加载中…</div>
+      </section>
+
+      <!-- 系统配置 -->
+      <section class="view" id="v-settings">
+        <div class="page-head"><div><h1>系统配置</h1><p>只读 · 访问控制由反代登录与防火墙承担</p></div><button class="btn primary" onclick="loadConfig()">刷新</button></div>
+        <div class="card"><div class="card-b" id="cfgRows">加载中…</div></div>
+      </section>
+
+    </main>
+  </div>
+</div>
+<div id="toast" style="position:fixed;left:50%;transform:translateX(-50%) translateY(-20px);bottom:36px;background:rgba(0,0,0,.78);color:#fff;padding:9px 18px;border-radius:8px;font-size:13px;opacity:0;transition:.25s;z-index:99;pointer-events:none"></div>
+<script>
+/* ===== 基础工具 ===== */
+function toast(msg){var t=document.getElementById('toast');t.textContent=msg;t.style.opacity='1';t.style.transform='translateX(-50%) translateY(0)';clearTimeout(t._t);t._t=setTimeout(function(){t.style.opacity='0';t.style.transform='translateX(-50%) translateY(-20px)'},1600);}
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+function fmtTs(iso){var d=new Date(iso);if(isNaN(d))return iso;function p(n){return (n<10?'0':'')+n}return p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())}
+function fmtDay(d){function p(n){return (n<10?'0':'')+n}return p(d.getMonth()+1)+'-'+p(d.getDate())}
+function fmtUptime(sec){var h=Math.floor(sec/3600),m=Math.floor(sec%3600/60);return h+' 小时 '+m+' 分'}
+
+/* ===== 菜单 ===== */
+var menus=document.querySelectorAll('.menu-item'),views=document.querySelectorAll('.view');
+var titles={dashboard:'数据看板',records:'消息推送记录',webhook:'WebHook 接入',logs:'系统日志',settings:'系统配置'};
+menus.forEach(function(m){m.addEventListener('click',function(){
+  menus.forEach(function(x){x.classList.remove('active')});m.classList.add('active');
+  var v=m.getAttribute('data-v');
+  views.forEach(function(s){s.classList.toggle('on',s.id==='v-'+v)});
+  document.getElementById('crumb').textContent=titles[v];
+  if(v==='records')loadRecords(1);
+  if(v==='logs')loadLogs();
+  if(v==='settings')loadConfig();
+  if(v==='webhook')loadWebhook();
+});});
+
+/* ===== API ===== */
+async function jget(u){var r=await fetch(u);return r.json()}
+async function jput(u,b){var r=await fetch(u,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return r.json()}
+
+/* ===== 看板 ===== */
+var lastStats=null;
+async function loadStats(){try{var d=await jget('/api/stats');renderStats(d.stats)}catch(e){}}
+function renderStats(s){
+  lastStats=s;
+  document.getElementById('stToday').textContent=s.today_count;
+  document.getElementById('stTodaySub').textContent=s.today_success+' 条成功 / '+s.today_count+' 条';
+  document.getElementById('stRate').textContent=s.today_count?Math.round(s.today_rate)+'%':'—';
+  document.getElementById('stRateSub').textContent='今日 '+(s.today_count-s.today_success)+' 条失败';
+  document.getElementById('stTotal').textContent=s.total_count;
+  var last=document.getElementById('stLast');
+  if(s.last_status==='ok'){last.innerHTML='<span class="badge s"><span class="dot" style="background:#52c41a"></span>成功</span>'}
+  else if(s.last_status==='error'){last.innerHTML='<span class="badge e"><span class="dot" style="background:#ff4d4f"></span>失败</span>'}
+  else{last.textContent='—'}
+  drawTrend(s.daily_counts||[]);
+}
+function drawTrend(counts){
+  var el=document.getElementById('chartTrend');if(!el)return;
+  var w=el.clientWidth||560,h=el.clientHeight||250,pad={l:36,r:14,t:20,b:28};
+  var max=Math.max.apply(null,counts.concat([1]));
+  var days=[];for(var i=6;i>=0;i--){var d=new Date();d.setDate(d.getDate()-i);days.push(fmtDay(d))}
+  var iw=w-pad.l-pad.r,ih=h-pad.t-pad.b;
+  var pts=counts.map(function(v,i){var x=pad.l+(counts.length>1?iw*i/(counts.length-1):iw/2);var y=pad.t+ih-(v/max)*ih;return [x,y]});
+  var poly=pts.map(function(p){return p[0].toFixed(1)+','+p[1].toFixed(1)}).join(' ');
+  var area=pts.length?('M'+pad.l+','+(pad.t+ih)+' L'+pts.map(function(p){return p[0].toFixed(1)+','+p[1].toFixed(1)}).join(' L')+' L'+(pad.l+iw)+','+(pad.t+ih)+' Z'):'';
+  var grid='';for(var g=0;g<=4;g++){var gy=pad.t+ih*g/4;var gv=Math.round(max*(4-g)/4);grid+='<line x1="'+pad.l+'" y1="'+gy+'" x2="'+(w-pad.r)+'" y2="'+gy+'" stroke="#f0f0f0"/><text x="'+(pad.l-6)+'" y="'+(gy+4)+'" text-anchor="end" font-size="11" fill="#8a919f">'+gv+'</text>'}
+  var labels=days.map(function(d,i){var x=pad.l+(iw*i/6);return '<text x="'+x+'" y="'+(h-8)+'" text-anchor="middle" font-size="11" fill="#8a919f">'+d+'</text>'}).join('');
+  var dots=pts.map(function(p,i){return '<circle cx="'+p[0].toFixed(1)+'" cy="'+p[1].toFixed(1)+'" r="3.5" fill="#1677ff"><title>'+days[i]+': '+counts[i]+' 条</title></circle>'}).join('');
+  el.innerHTML='<svg viewBox="0 0 '+w+' '+h+'" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg">'+grid+
+    '<path d="'+area+'" fill="rgba(22,119,255,.12)"/>'+
+    '<polyline fill="none" stroke="#1677ff" stroke-width="2.5" points="'+poly+'"/>'+dots+labels+'</svg>';
+}
+
+/* ===== 实时事件流（看板 & webhook 页共用） ===== */
+var flowRows=[];
+function renderFlow(){
+  var html=flowRows.map(function(r){
+    var badge=r.status==='ok'?'<span class="badge s" style="margin-left:6px">成功</span>':'<span class="badge e" style="margin-left:6px">失败</span>';
+    return '<div class="flow-row"><div class="flow-time">'+fmtTs(r.ts)+'</div><div class="flow-body">'+
+      '<div class="flow-source">'+esc(r.source)+'<span class="tag">#'+r.id+'</span>'+badge+'</div>'+
+      '<div class="flow-payload">'+esc(r.snippet)+(r.has_image?' 📷':'')+'</div></div></div>';
+  }).join('');
+  if(!html)html='<div style="color:var(--text-3);font-size:13px;padding:8px 0">暂无事件</div>';
+  document.getElementById('flow').innerHTML=html;
+  document.getElementById('whFlow').innerHTML=html;
+}
+function pushFlow(rec){flowRows.unshift(rec);if(flowRows.length>20)flowRows.pop();renderFlow()}
+
+/* ===== 推送记录 ===== */
+var recPage=1,recTotal=0,recLimit=50;
+async function loadRecords(page,reset){
+  if(page<1)page=1;
+  try{
+    var d=await jget('/api/records?offset='+((page-1)*recLimit)+'&limit='+recLimit);
+    recTotal=d.total;recPage=page;
+    var pages=Math.max(1,Math.ceil(recTotal/recLimit));
+    if(page>pages){return loadRecords(pages)}
+    document.getElementById('pgInfo').textContent=page+' / '+pages;
+    document.getElementById('pgPrev').disabled=page<=1;
+    document.getElementById('pgNext').disabled=page>=pages;
+    var body=document.getElementById('recBody');
+    if(!d.items||!d.items.length){
+      body.innerHTML='<tr><td colspan="4" style="color:var(--text-3);text-align:center;padding:24px">暂无记录</td></tr>';return;
+    }
+    body.innerHTML=d.items.map(function(r){
+      var status=r.status==='ok'
+        ?'<span class="badge s"><span class="dot" style="background:#52c41a"></span>成功</span>'
+        :'<span class="badge e" title="'+esc(r.error||'')+'"><span class="dot" style="background:#ff4d4f"></span>失败</span>';
+      var img=r.has_image?'<img class="rc-img" loading="lazy" src="/api/records/'+r.id+'/image" alt="截图" onclick="window.open(this.src)">':'';
+      return '<tr><td class="id-cell"><div class="num">#'+r.id+'</div><div class="ts">'+fmtTs(r.ts)+'</div></td>'+
+        '<td><div title="'+esc(r.content)+'">'+esc(r.snippet)+'</div>'+img+'</td>'+
+        '<td>'+esc(r.source)+'</td><td>'+status+'</td></tr>';
+    }).join('');
+  }catch(e){toast('加载记录失败')}
+}
+
+/* ===== WebHook 页 ===== */
+async function loadWebhook(){
+  try{
+    var d=await jget('/api/webhook');
+    var url=d.url||'';
+    document.getElementById('whInput').value=url;
+    document.getElementById('epUrl').textContent=url||(location.origin.replace(/\/$/,'')+'/notify  （本地默认，反代后改上方域名）');
+  }catch(e){}
+}
+async function saveWebhook(){
+  var url=document.getElementById('whInput').value.trim();
+  try{
+    var d=await jput('/api/webhook',{url:url});
+    if(!d.ok){toast('保存失败: '+(d.error||''));return}
+    toast('域名已保存');loadWebhook();
+  }catch(e){toast('保存失败')}
+}
+async function copyTpl(){
+  var text=document.getElementById('tplBlock').textContent;
+  try{await navigator.clipboard.writeText(text);toast('已复制 body 模板')}catch(e){toast('复制失败，请手动选择')}
+}
+
+/* ===== 系统日志 ===== */
+var logLines=[],logPinned=true;
+function renderLogs(){
+  var box=document.getElementById('logBox');
+  if(!logLines.length){box.innerHTML='<span class="lt">（暂无日志）</span>';return}
+  box.innerHTML=logLines.map(function(l){
+    var isErr=/失败|FATAL|error|panic/i.test(l);
+    return '<div class="'+(isErr?'err':'')+'">'+esc(l)+'</div>';
+  }).join('');
+  box.scrollTop=box.scrollHeight;
+}
+async function loadLogs(){
+  try{var d=await jget('/api/logs?n=300');logLines=d.lines||[];renderLogs()}catch(e){toast('加载日志失败')}
+}
+function clearLogView(){logLines=[];renderLogs();toast('视图已清空（磁盘文件不受影响）')}
+function appendLog(line){logLines.push(line);if(logLines.length>1000)logLines.splice(0,logLines.length-1000);renderLogs()}
+
+/* ===== 系统配置（只读） ===== */
+async function loadConfig(){
+  try{
+    var d=await jget('/api/config');var c=d.config;
+    document.getElementById('verLabel').textContent='v'+c.version;
+    var rows=[
+      ['目标类型',c.target_type==='c2c'?'单聊 (c2c)':'群聊 (group)'],
+      ['目标 OpenID','<span class="mono">'+esc(c.target_openid)+'</span>'],
+      ['QQ AppID','<span class="mono">'+esc(c.app_id)+'</span>'],
+      ['QQ AppSecret','<span class="mono">'+esc(c.app_secret)+'</span>'],
+      ['API 地址','<span class="mono">'+esc(c.api_base)+'</span>'],
+      ['监听地址','<span class="mono">'+esc(c.listen_addr)+'</span>'],
+      ['入站 Token',c.gateway_token?'<span class="mono">'+esc(c.gateway_token)+'</span>':'<span style="color:var(--text-3)">未设置（LAN 直连）</span>'],
+      ['数据目录','<span class="mono">'+esc(c.data_dir)+'</span>'],
+      ['公网域名',c.webhook_url?'<span class="mono">'+esc(c.webhook_url)+'</span>':'<span style="color:var(--text-3)">未设置</span>'],
+      ['运行时长',fmtUptime(c.uptime_seconds)],
+      ['WS 连接数',String(c.ws_clients)]
+    ];
+    document.getElementById('cfgRows').innerHTML=rows.map(function(r){
+      return '<div class="form-row"><div class="lbl">'+r[0]+'</div><div class="ctl">'+r[1]+'</div></div>';
+    }).join('');
+  }catch(e){toast('加载配置失败')}
+}
+
+/* ===== WebSocket：仅页面可见时连接 ===== */
+var ws=null,retry=0;
+function setWsDot(on,txt){var d=document.getElementById('wsDot');d.className='ws-dot'+(on?' on':'');d.innerHTML='<i></i>'+txt;var s=document.getElementById('stWs');if(s)s.textContent=txt}
+function wsConnect(){
+  if(document.visibilityState!=='visible'||ws)return;
+  var proto=location.protocol==='https:'?'wss:':'ws:';
+  try{ws=new WebSocket(proto+'//'+location.host+'/api/ws')}catch(e){return}
+  ws.onopen=function(){retry=0;setWsDot(true,'WS 实时已连接');
+    if(!flowRows.length)loadRecords(1).then(function(){return jget('/api/records?offset=0&limit=15')}).then(function(d){(d.items||[]).forEach(pushFlow)})};
+  ws.onmessage=function(e){
+    try{
+      var ev=JSON.parse(e.data);
+      if(ev.type==='record'){pushFlow(ev.data);if(document.getElementById('v-records').classList.contains('on'))loadRecords(recPage);}
+      else if(ev.type==='stats'){renderStats(ev.data)}
+      else if(ev.type==='log'){appendLog(ev.data)}
+      else if(ev.type==='webhook'){loadWebhook()}
+    }catch(err){}
+  };
+  ws.onclose=function(){ws=null;setWsDot(false,'实时断开');
+    if(document.visibilityState==='visible'){retry++;setTimeout(wsConnect,Math.min(10000,1000*retry))}};
+  ws.onerror=function(){try{ws.close()}catch(e){}};
+}
+function wsDisconnect(){if(ws){var c=ws;ws=null;c.onclose=null;c.onclose=function(){};try{c.close()}catch(e){}}setWsDot(false,'实时断开')}
+document.addEventListener('visibilitychange',function(){document.visibilityState==='visible'?wsConnect():wsDisconnect()});
+window.addEventListener('pagehide',wsDisconnect);
+window.addEventListener('resize',function(){if(lastStats)drawTrend(lastStats.daily_counts||[])});
+
+/* ===== 初始化 ===== */
+loadStats();loadRecords(1);loadWebhook();loadLogs();loadConfig();
+wsConnect();
+</script>
+</body>
+</html>

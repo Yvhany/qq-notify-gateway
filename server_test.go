@@ -27,6 +27,8 @@ type testEnv struct {
 	qqMock  *httptest.Server
 	cfg     Config
 	qq      *QQClient
+	store   *RecordStore
+	ui      *webUI
 	handler http.Handler
 }
 
@@ -44,7 +46,13 @@ func newTestEnv(t *testing.T, targetType string, qqHandler http.HandlerFunc) *te
 		APIBase:      mock.URL,
 	}
 	qq := NewQQClient(cfg, staticTokenSource{}, 5*time.Second)
-	return &testEnv{qqMock: mock, cfg: cfg, qq: qq, handler: newMux(cfg, qq)}
+	store, err := NewRecordStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub := NewHub()
+	ui := newWebUI(cfg, store, hub, t.TempDir())
+	return &testEnv{qqMock: mock, cfg: cfg, qq: qq, store: store, ui: ui, handler: newMux(cfg, qq, ui)}
 }
 
 func notifyReq(body, gatewayToken string) *http.Request {
@@ -133,7 +141,7 @@ func TestNotifyAuthRequired(t *testing.T) {
 		_, _ = w.Write([]byte(`{"id":"m"}`))
 	})
 	env.cfg.GatewayToken = "sekrit"
-	env.handler = newMux(env.cfg, env.qq)
+	env.handler = newMux(env.cfg, env.qq, env.ui)
 
 	if code, _ := doJSON(t, env.handler, notifyReq(`{"content":"x"}`, "")); code != http.StatusUnauthorized {
 		t.Errorf("无 token 期望 401，得到 %d", code)
