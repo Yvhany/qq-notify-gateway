@@ -1,0 +1,854 @@
+﻿diff --git a/docker-compose.yml b/docker-compose.yml
+index 091ef46..803483f 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -3,6 +3,11 @@ services:
+     build: .
+     container_name: qq-notify-gateway
+     env_file: .env
++    environment:
++      DATA_DIR: /data
++      TZ: Asia/Shanghai
++    volumes:
++      - ./data:/data
+     ports:
+       - "18080:8080"
+     restart: unless-stopped
+diff --git a/go.mod b/go.mod
+index 8b203f5..323977a 100644
+--- a/go.mod
++++ b/go.mod
+@@ -3,13 +3,13 @@ module qq-notify-gateway
+ go 1.27.1
+ 
+ require (
++	github.com/gorilla/websocket v1.4.2
+ 	github.com/tencent-connect/botgo v0.2.1
+ 	golang.org/x/oauth2 v0.23.0
+ )
+ 
+ require (
+ 	github.com/go-resty/resty/v2 v2.6.0 // indirect
+-	github.com/gorilla/websocket v1.4.2 // indirect
+ 	github.com/tidwall/gjson v1.9.3 // indirect
+ 	github.com/tidwall/match v1.1.1 // indirect
+ 	github.com/tidwall/pretty v1.2.0 // indirect
+diff --git a/hub.go b/hub.go
+new file mode 100644
+index 0000000..6547162
+--- /dev/null
++++ b/hub.go
+@@ -0,0 +1,130 @@
++package main
++
++import (
++	"encoding/json"
++	"log"
++	"net/http"
++	"os"
++	"path/filepath"
++	"sync"
++	"time"
++
++	"github.com/gorilla/websocket"
++)
++
++// Hub 管理 /api/ws 连接并做单向广播（服务端 → 页面）。
++type Hub struct {
++	mu      sync.Mutex
++	clients map[*websocket.Conn]struct{}
++}
++
++func NewHub() *Hub {
++	return &Hub{clients: make(map[*websocket.Conn]struct{})}
++}
++
++var upgrader = websocket.Upgrader{
++	ReadBufferSize:  1024,
++	WriteBufferSize: 4096,
++	// 部署在反代登录与防火墙之后，不做 Origin 校验（与 /notify 同一信任模型）
++	CheckOrigin: func(*http.Request) bool { return true },
++}
++
++// wsEvent 统一推送帧。
++type wsEvent struct {
++	Type string `json:"type"` // hello | record | log | stats | webhook
++	Data any    `json:"data"`
++}
++
++// Broadcast 向所有连接推送事件；写失败的连接即时剔除。
++func (h *Hub) Broadcast(typ string, data any) {
++	frame, err := json.Marshal(wsEvent{Type: typ, Data: data})
++	if err != nil {
++		return
++	}
++	h.mu.Lock()
++	defer h.mu.Unlock()
++	for c := range h.clients {
++		_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))
++		if err := c.WriteMessage(websocket.TextMessage, frame); err != nil {
++			_ = c.Close()
++			delete(h.clients, c)
++		}
++	}
++}
++
++// ServeWS 升级并注册连接；读循环用于感知客户端关闭（页面隐藏/卸载时前端主动 close）。
++func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
++	conn, err := upgrader.Upgrade(w, r, nil)
++	if err != nil {
++		return
++	}
++	h.mu.Lock()
++	h.clients[conn] = struct{}{}
++	h.mu.Unlock()
++
++	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
++	_ = conn.WriteJSON(wsEvent{Type: "hello", Data: map[string]any{"ok": true}})
++
++	defer func() {
++		h.mu.Lock()
++		delete(h.clients, conn)
++		h.mu.Unlock()
++		_ = conn.Close()
++	}()
++
++	// 只读循环：客户端只发关闭/ping，不做业务消息
++	conn.SetReadLimit(1024)
++	for {
++		if _, _, err := conn.ReadMessage(); err != nil {
++			return
++		}
++	}
++}
++
++// ClientCount 当前连接数（诊断用）。
++func (h *Hub) ClientCount() int {
++	h.mu.Lock()
++	defer h.mu.Unlock()
++	return len(h.clients)
++}
++
++// broadcastLog 供 log tee 调用：没人看时直接跳过。
++func (h *Hub) broadcastLog(line string) {
++	if h.ClientCount() == 0 {
++		return
++	}
++	h.Broadcast("log", line)
++}
++
++// setupLog 将标准库 log 同时写入文件与 stderr，并经 hub 广播到页面。
++// botgo SDK 内部 debug 走自身 logger，不进 UI 日志。
++func setupLog(dir string, h *Hub) error {
++	logDir := filepath.Join(dir, "logs")
++	if err := os.MkdirAll(logDir, 0o755); err != nil {
++		return err
++	}
++	path := filepath.Join(logDir, "gateway.log")
++	if fi, err := os.Stat(path); err == nil && fi.Size() > 32<<20 {
++		_ = os.Rename(path, path+".1")
++	}
++	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
++	if err != nil {
++		return err
++	}
++	log.SetOutput(&teeLogWriter{file: f, hub: h})
++	return nil
++}
++
++type teeLogWriter struct {
++	file *os.File
++	hub  *Hub
++}
++
++func (t *teeLogWriter) Write(p []byte) (int, error) {
++	line := string(p)
++	if n := len(line); n > 0 && line[n-1] == '\n' {
++		line = line[:n-1]
++	}
++	t.hub.broadcastLog(line)
++	return t.file.Write(p)
++}
+diff --git a/main.go b/main.go
+index be85c9d..f0eda19 100644
+--- a/main.go
++++ b/main.go
+@@ -32,6 +32,22 @@ func main() {
+ 		log.Fatalf("配置错误: %v", err)
+ 	}
+ 
++	// 数据层：记录持久化 + WS hub + 日志落盘（需在业务日志前就位）
++	dataDir := getenvDefault("DATA_DIR", "data")
++	store, err := NewRecordStore(dataDir)
++	if err != nil {
++		log.Fatalf("初始化记录存储失败: %v", err)
++	}
++	hub := NewHub()
++	if err := setupLog(dataDir, hub); err != nil {
++		log.Fatalf("初始化日志文件失败: %v", err)
++	}
++	store.SetOnChange(func(rec Record) {
++		hub.Broadcast("record", rec)
++		hub.Broadcast("stats", store.Stats())
++	})
++	ui := newWebUI(cfg, store, hub, dataDir)
++
+ 	// botgo token source：atomic 缓存 + singleflight + 后台自动刷新
+ 	tokenSource := token.NewQQBotTokenSource(&token.QQBotCredentials{
+ 		AppID:     cfg.AppID,
+@@ -44,7 +60,7 @@ func main() {
+ 	qq := NewQQClient(cfg, tokenSource, 60*time.Second)
+ 	srv := &http.Server{
+ 		Addr:              cfg.ListenAddr,
+-		Handler:           newMux(cfg, qq),
++		Handler:           newMux(cfg, qq, ui),
+ 		ReadHeaderTimeout: 10 * time.Second,
+ 	}
+ 
+diff --git a/server.go b/server.go
+index 779efaa..4ec249b 100644
+--- a/server.go
++++ b/server.go
+@@ -15,14 +15,26 @@ type notifyRequest struct {
+ 	Title   string `json:"title"`
+ 	Content string `json:"content"`
+ 	Image   string `json:"image"` // base64，可带 data URI 前缀
++	Source  string `json:"source"` // 可选来源标识，缺省 WebHook
+ }
+ 
+-// newMux 组装网关 HTTP 路由。
+-func newMux(cfg Config, qq *QQClient) http.Handler {
++// newMux 组装网关 HTTP 路由：入站推送 + Web UI。
++func newMux(cfg Config, qq *QQClient, ui *webUI) http.Handler {
+ 	mux := http.NewServeMux()
+ 	mux.HandleFunc("POST /notify", func(w http.ResponseWriter, r *http.Request) {
+-		handleNotify(cfg, qq, w, r)
++		handleNotify(cfg, qq, ui, w, r)
+ 	})
++
++	// Web UI（内嵌前端与 API）
++	mux.HandleFunc("GET /api/stats", ui.handleStats)
++	mux.HandleFunc("GET /api/records", ui.handleRecords)
++	mux.HandleFunc("GET /api/records/{id}/image", ui.handleRecordImage)
++	mux.HandleFunc("GET /api/config", ui.handleConfig)
++	mux.HandleFunc("GET /api/logs", ui.handleLogs)
++	mux.HandleFunc("GET /api/webhook", ui.handleWebhookGet)
++	mux.HandleFunc("PUT /api/webhook", ui.handleWebhookPut)
++	mux.HandleFunc("GET /api/ws", ui.hub.ServeWS)
++	mux.HandleFunc("GET /", ui.handleIndex)
+ 	return mux
+ }
+ 
+@@ -32,81 +44,105 @@ func writeJSON(w http.ResponseWriter, status int, payload map[string]any) {
+ 	_ = json.NewEncoder(w).Encode(payload)
+ }
+ 
+-func handleNotify(cfg Config, qq *QQClient, w http.ResponseWriter, r *http.Request) {
++func handleNotify(cfg Config, qq *QQClient, ui *webUI, w http.ResponseWriter, r *http.Request) {
+ 	if cfg.GatewayToken != "" &&
+ 		subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Gateway-Token")), []byte(cfg.GatewayToken)) != 1 {
++		// 鉴权失败视为攻击噪声，不入推送记录
+ 		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid gateway token"})
+ 		return
+ 	}
+ 
++	var (
++		req           notifyRequest
++		imageData     []byte
++		imageExt      string
++		recordContent string
++	)
++
++	// 统一出口：写记录（含 WS 广播）后应答
++	respond := func(code int, errMsg string) {
++		if ui != nil {
++			status := "ok"
++			if code != http.StatusOK {
++				status = "error"
++			}
++			src := strings.TrimSpace(req.Source)
++			if src == "" {
++				src = "WebHook"
++			}
++			ui.store.Add(src, status, errMsg, recordContent, imageData, imageExt)
++		}
++		payload := map[string]any{"ok": code == http.StatusOK}
++		if errMsg != "" {
++			payload["error"] = errMsg
++		}
++		writeJSON(w, code, payload)
++	}
++
+ 	// base64 图片最多约为原图 4/3，32MB 上限足够 20MB 图片
+ 	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
+-	var req notifyRequest
+ 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+ 		var maxErr *http.MaxBytesError
+ 		if errors.As(err, &maxErr) {
+-			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "error": "请求体过大"})
++			respond(http.StatusRequestEntityTooLarge, "请求体过大")
+ 			return
+ 		}
+-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "JSON 解析失败: " + err.Error()})
++		respond(http.StatusBadRequest, "JSON 解析失败: "+err.Error())
+ 		return
+ 	}
+ 
++	text := mergeText(req.Title, req.Content)
++	recordContent = text
++
+ 	imageData, err := decodeImagePayload(req.Image)
+ 	if err != nil {
+-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
++		respond(http.StatusBadRequest, err.Error())
+ 		return
+ 	}
+-	imageName := ""
+ 	if len(imageData) > 0 {
+ 		if len(imageData) > maxImageBytes {
+-			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+-				"ok": false,
+-				"error": fmt.Sprintf("图片 %d 字节超过上限 %d", len(imageData), maxImageBytes),
+-			})
++			respond(http.StatusRequestEntityTooLarge,
++				fmt.Sprintf("图片 %d 字节超过上限 %d", len(imageData), maxImageBytes))
+ 			return
+ 		}
+ 		mime := http.DetectContentType(imageData)
+ 		switch mime {
+ 		case "image/jpeg":
+-			imageName = "notify.jpg"
++			imageExt = ".jpg"
+ 		case "image/png":
+-			imageName = "notify.png"
++			imageExt = ".png"
+ 		default:
+-			writeJSON(w, http.StatusUnsupportedMediaType, map[string]any{
+-				"ok": false, "error": "仅支持 JPEG/PNG 图片，实际类型: " + mime,
+-			})
++			respond(http.StatusUnsupportedMediaType, "仅支持 JPEG/PNG 图片，实际类型: "+mime)
+ 			return
+ 		}
+ 	}
+ 
+-	text := mergeText(req.Title, req.Content)
+ 	if text == "" && len(imageData) == 0 {
+-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "title、content、image 不能全部为空"})
++		respond(http.StatusBadRequest, "title、content、image 不能全部为空")
+ 		return
+ 	}
+ 
+ 	if text != "" {
+ 		if err := qq.SendText(r.Context(), text); err != nil {
+ 			log.Printf("发送文本失败: %v", err)
+-			writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
++			respond(http.StatusBadGateway, err.Error())
+ 			return
+ 		}
+ 	}
+ 	if len(imageData) > 0 {
+-		fileInfo, err := qq.UploadImage(r.Context(), imageName, imageData)
++		fileInfo, err := qq.UploadImage(r.Context(), "notify"+imageExt, imageData)
+ 		if err != nil {
+ 			log.Printf("上传图片失败: %v", err)
+-			writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
++			respond(http.StatusBadGateway, err.Error())
+ 			return
+ 		}
+ 		if err := qq.SendImage(r.Context(), fileInfo); err != nil {
+ 			log.Printf("发送图片失败: %v", err)
+-			writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
++			respond(http.StatusBadGateway, err.Error())
+ 			return
+ 		}
+ 	}
+-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
++	respond(http.StatusOK, "")
+ }
+ 
+ // mergeText 非空部分按行合并。
+diff --git a/store.go b/store.go
+new file mode 100644
+index 0000000..2dfdc39
+--- /dev/null
++++ b/store.go
+@@ -0,0 +1,272 @@
++package main
++
++import (
++	"bufio"
++	"encoding/json"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++	"time"
++)
++
++const (
++	maxRecordsInMemory = 2000 // 启动载入与内存上限
++	maxImagesRetained  = 200  // 图片文件保留张数
++	snippetRunes       = 10   // 记录页内容截断字数
++)
++
++// Record 一条推送记录（持久化于 records.jsonl，不含图片字节）。
++type Record struct {
++	ID      uint64 `json:"id"`
++	TS      string `json:"ts"` // RFC3339 本地时区
++	Source  string `json:"source"`
++	Status  string `json:"status"` // ok | error
++	Error   string `json:"error,omitempty"`
++	Content string `json:"content"`
++	Snippet string `json:"snippet"`
++	HasImage bool  `json:"has_image"`
++}
++
++// makeSnippet 按 rune 截取前 10 字，超出追加三个点。
++func makeSnippet(content string) string {
++	runes := []rune(strings.TrimSpace(content))
++	if len(runes) <= snippetRunes {
++		return string(runes)
++	}
++	return string(runes[:snippetRunes]) + "..."
++}
++
++// Stats 数据看板统计。
++type Stats struct {
++	TodayCount      int      `json:"today_count"`
++	TodaySuccess    int      `json:"today_success"`
++	TodayRate       float64  `json:"today_rate"` // 0-100，今日无记录为 0
++	TotalCount      int      `json:"total_count"`
++	LastStatus      string   `json:"last_status"`
++	DailyCounts     []int    `json:"daily_counts"` // 近 7 日 [旧→新]
++	DailySuccess    []int    `json:"daily_success"`
++}
++
++// RecordStore 推送记录存储：内存 + JSONL 追加 + 图片文件。
++type RecordStore struct {
++	mu       sync.Mutex
++	dir      string
++	records  []Record // 旧→新
++	nextID   uint64
++	onChange func(Record) // 新记录回调（用于 WS 广播），回调在锁外触发
++}
++
++// NewRecordStore 载入历史记录并准备图片目录。
++func NewRecordStore(dir string) (*RecordStore, error) {
++	s := &RecordStore{dir: dir, nextID: 1}
++	if err := os.MkdirAll(filepath.Join(dir, "images"), 0o755); err != nil {
++		return nil, fmt.Errorf("创建记录目录失败: %w", err)
++	}
++	path := filepath.Join(dir, "records.jsonl")
++	f, err := os.Open(path)
++	if err != nil {
++		if os.IsNotExist(err) {
++			return s, nil
++		}
++		return nil, err
++	}
++	defer f.Close()
++
++	sc := bufio.NewScanner(f)
++	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
++	var all []Record
++	for sc.Scan() {
++		line := strings.TrimSpace(sc.Text())
++		if line == "" {
++			continue
++		}
++		var r Record
++		if err := json.Unmarshal([]byte(line), &r); err != nil {
++			continue
++		}
++		all = append(all, r)
++	}
++	if err := sc.Err(); err != nil {
++		return nil, fmt.Errorf("读取记录失败: %w", err)
++	}
++	if len(all) > maxRecordsInMemory {
++		all = all[len(all)-maxRecordsInMemory:]
++	}
++	s.records = all
++	if len(all) > 0 {
++		s.nextID = all[len(all)-1].ID + 1
++	}
++	s.pruneImages()
++	return s, nil
++}
++
++// SetOnChange 注册新记录回调（WS 广播用）。
++func (s *RecordStore) SetOnChange(f func(Record)) { s.onChange = f }
++
++// Add 写入一条记录并持久化；带图时先存图片文件。
++func (s *RecordStore) Add(source, status, errMsg, content string, image []byte, imageExt string) Record {
++	s.mu.Lock()
++	rec := Record{
++		ID:       s.nextID,
++		TS:       time.Now().Format(time.RFC3339),
++		Source:   source,
++		Status:   status,
++		Error:    errMsg,
++		Content:  content,
++		Snippet:  makeSnippet(content),
++		HasImage: len(image) > 0,
++	}
++	s.nextID++
++	s.records = append(s.records, rec)
++	if len(s.records) > maxRecordsInMemory {
++		s.records = s.records[len(s.records)-maxRecordsInMemory:]
++	}
++	s.mu.Unlock()
++
++	// 持久化（追加一行）
++	if f, err := os.OpenFile(filepath.Join(s.dir, "records.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
++		if line, err := json.Marshal(rec); err == nil {
++			_, _ = f.Write(append(line, '\n'))
++		}
++		_ = f.Close()
++	}
++
++	// 图片落盘
++	if rec.HasImage {
++		if imageExt == "" {
++			imageExt = ".jpg"
++		}
++		imgPath := filepath.Join(s.dir, "images", fmt.Sprintf("%d%s", rec.ID, imageExt))
++		_ = os.WriteFile(imgPath, image, 0o644)
++		s.pruneImages()
++	}
++
++	if s.onChange != nil {
++		s.onChange(rec)
++	}
++	return rec
++}
++
++// ImagePath 返回记录对应图片路径（不存在返回空）。
++func (s *RecordStore) ImagePath(id uint64) string {
++	matches, _ := filepath.Glob(filepath.Join(s.dir, "images", fmt.Sprintf("%d.*", id)))
++	if len(matches) == 0 {
++		return ""
++	}
++	return matches[0]
++}
++
++// pruneImages 仅保留最新 maxImagesRetained 张图片文件。
++func (s *RecordStore) pruneImages() {
++	files, _ := filepath.Glob(filepath.Join(s.dir, "images", "*"))
++	if len(files) <= maxImagesRetained {
++		return
++	}
++	// 按文件名（=记录id）排序，旧的在前
++	sortPaths(files)
++	for _, p := range files[:len(files)-maxImagesRetained] {
++		_ = os.Remove(p)
++	}
++}
++
++// List 返回记录（新→旧），支持 offset/limit。
++func (s *RecordStore) List(offset, limit int) (total int, out []Record) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	total = len(s.records)
++	if offset < 0 {
++		offset = 0
++	}
++	// 新→旧遍历
++	rev := make([]Record, 0, len(s.records))
++	for i := len(s.records) - 1; i >= 0; i-- {
++		rev = append(rev, s.records[i])
++	}
++	if offset >= len(rev) {
++		return total, nil
++	}
++	end := offset + limit
++	if limit <= 0 || end > len(rev) {
++		end = len(rev)
++	}
++	return total, rev[offset:end]
++}
++
++// Recent 返回最新的 n 条（旧→新，供事件流/初值）。
++func (s *RecordStore) Recent(n int) []Record {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if n > len(s.records) {
++		n = len(s.records)
++	}
++	out := make([]Record, n)
++	copy(out, s.records[len(s.records)-n:])
++	return out
++}
++
++// Stats 计算看板统计（按本机时区的“今日”与近 7 日）。
++func (s *RecordStore) Stats() Stats {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	now := time.Now()
++	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
++	var st Stats
++	st.TotalCount = len(s.records)
++	days := make([]time.Time, 7)
++	for i := 0; i < 7; i++ {
++		days[i] = today.AddDate(0, 0, i-6)
++	}
++	st.DailyCounts = make([]int, 7)
++	st.DailySuccess = make([]int, 7)
++
++	for _, r := range s.records {
++		ts, err := time.Parse(time.RFC3339, r.TS)
++		if err != nil {
++			continue
++		}
++		if !ts.Before(today) {
++			st.TodayCount++
++			if r.Status == "ok" {
++				st.TodaySuccess++
++			}
++		}
++		day := time.Date(ts.Year(), ts.Month(), ts.Day(), 0, 0, 0, 0, ts.Location())
++		for i, d := range days {
++			if day.Equal(d) {
++				st.DailyCounts[i]++
++				if r.Status == "ok" {
++					st.DailySuccess[i]++
++				}
++			}
++		}
++	}
++	if st.TodayCount > 0 {
++		st.TodayRate = float64(st.TodaySuccess) / float64(st.TodayCount) * 100
++	}
++	if n := len(s.records); n > 0 {
++		st.LastStatus = s.records[n-1].Status
++	}
++	return st
++}
++
++// sortPaths 按文件名字典序排序（id 数字前缀在位数一致时即时间序；
++// 位数不同时用长度比较兜底）。
++func sortPaths(paths []string) {
++	for i := 1; i < len(paths); i++ {
++		for j := i; j > 0 && pathLess(paths[j], paths[j-1]); j-- {
++			paths[j], paths[j-1] = paths[j-1], paths[j]
++		}
++	}
++}
++
++func pathLess(a, b string) bool {
++	a = filepath.Base(a)
++	b = filepath.Base(b)
++	if len(a) != len(b) {
++		return len(a) < len(b)
++	}
++	return a < b
++}
+diff --git a/webui.go b/webui.go
+new file mode 100644
+index 0000000..bf26536
+--- /dev/null
++++ b/webui.go
+@@ -0,0 +1,201 @@
++package main
++
++import (
++	"embed"
++	"encoding/json"
++	"io/fs"
++	"net/http"
++	"net/url"
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"time"
++)
++
++//go:embed webui
++var webuiFS embed.FS
++
++var version = "dev"
++
++// webhookCfg 持久化的公网域名（仅 UI 展示与复制用）。
++type webhookCfg struct {
++	WebhookURL string `json:"webhook_url"`
++}
++
++// webUI 聚合 Web 界面所需依赖与状态。
++type webUI struct {
++	cfg         Config
++	store       *RecordStore
++	hub         *Hub
++	dataDir     string
++	startedAt   time.Time
++	webhookFile string
++}
++
++func newWebUI(cfg Config, store *RecordStore, hub *Hub, dataDir string) *webUI {
++	return &webUI{
++		cfg:         cfg,
++		store:       store,
++		hub:         hub,
++		dataDir:     dataDir,
++		startedAt:   time.Now(),
++		webhookFile: filepath.Join(dataDir, "webui.json"),
++	}
++}
++
++// handleStats 看板统计。
++func (u *webUI) handleStats(w http.ResponseWriter, _ *http.Request) {
++	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "stats": u.store.Stats()})
++}
++
++// handleRecords 分页列出记录（新→旧）。
++func (u *webUI) handleRecords(w http.ResponseWriter, r *http.Request) {
++	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
++	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
++	if limit <= 0 || limit > 200 {
++		limit = 50
++	}
++	total, items := u.store.List(offset, limit)
++	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "total": total, "items": items})
++}
++
++// handleRecordImage 输出记录附带的图片。
++func (u *webUI) handleRecordImage(w http.ResponseWriter, r *http.Request) {
++	idStr := r.PathValue("id")
++	id, err := strconv.ParseUint(idStr, 10, 64)
++	if err != nil {
++		http.NotFound(w, r)
++		return
++	}
++	path := u.store.ImagePath(id)
++	if path == "" {
++		http.NotFound(w, r)
++		return
++	}
++	http.ServeFile(w, r, path)
++}
++
++// handleConfig 只读全量配置（按用户指示不打码，访问控制由反代承担）。
++func (u *webUI) handleConfig(w http.ResponseWriter, _ *http.Request) {
++	wh := u.loadWebhook()
++	writeJSON(w, http.StatusOK, map[string]any{
++		"ok": true,
++		"config": map[string]any{
++			"target_type":    u.cfg.TargetType,
++			"target_openid":  u.cfg.TargetOpenID,
++			"api_base":       u.cfg.APIBase,
++			"listen_addr":    u.cfg.ListenAddr,
++			"app_id":         u.cfg.AppID,
++			"app_secret":     u.cfg.Secret,
++			"gateway_token":  u.cfg.GatewayToken,
++			"data_dir":       u.dataDir,
++			"webhook_url":    wh.WebhookURL,
++			"version":        version,
++			"uptime_seconds": int(time.Since(u.startedAt).Seconds()),
++			"ws_clients":     u.hub.ClientCount(),
++		},
++	})
++}
++
++// handleLogs 读取日志文件尾部（初值；之后靠 WS 追加）。
++func (u *webUI) handleLogs(w http.ResponseWriter, r *http.Request) {
++	n, _ := strconv.Atoi(r.URL.Query().Get("n"))
++	if n <= 0 || n > 2000 {
++		n = 200
++	}
++	lines := tailFile(filepath.Join(u.dataDir, "logs", "gateway.log"), n)
++	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "lines": lines})
++}
++
++// handleWebhookGet 读取已保存的公网域名。
++func (u *webUI) handleWebhookGet(w http.ResponseWriter, _ *http.Request) {
++	wh := u.loadWebhook()
++	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": wh.WebhookURL})
++}
++
++// handleWebhookPut 保存公网域名（仅 http/https，空值表示清除）。
++func (u *webUI) handleWebhookPut(w http.ResponseWriter, r *http.Request) {
++	var req struct {
++		URL string `json:"url"`
++	}
++	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
++		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "JSON 解析失败"})
++		return
++	}
++	req.URL = strings.TrimSpace(req.URL)
++	if req.URL != "" {
++		parsed, err := url.Parse(req.URL)
++		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
++			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "仅允许 http/https 完整 URL"})
++			return
++		}
++	}
++	wh := webhookCfg{WebhookURL: req.URL}
++	data, _ := json.MarshalIndent(wh, "", "  ")
++	if err := os.WriteFile(u.webhookFile, data, 0o644); err != nil {
++		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
++		return
++	}
++	u.hub.Broadcast("webhook", wh)
++	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": wh.WebhookURL})
++}
++
++func (u *webUI) loadWebhook() webhookCfg {
++	var wh webhookCfg
++	data, err := os.ReadFile(u.webhookFile)
++	if err != nil {
++		return wh
++	}
++	_ = json.Unmarshal(data, &wh)
++	return wh
++}
++
++// handleIndex 提供内嵌的单文件前端。
++func (u *webUI) handleIndex(w http.ResponseWriter, r *http.Request) {
++	sub, err := fs.Sub(webuiFS, "webui")
++	if err != nil {
++		http.NotFound(w, r)
++		return
++	}
++	if r.URL.Path != "/" && r.URL.Path != "/index.html" {
++		http.NotFound(w, r)
++		return
++	}
++	http.FileServer(http.FS(sub)).ServeHTTP(w, r)
++}
++
++// tailFile 取文件末尾 n 行（读取末尾至多 512KB）。
++func tailFile(path string, n int) []string {
++	f, err := os.Open(path)
++	if err != nil {
++		return []string{}
++	}
++	defer f.Close()
++	fi, err := f.Stat()
++	if err != nil {
++		return []string{}
++	}
++	size := fi.Size()
++	const window = 512 * 1024
++	start := int64(0)
++	if size > window {
++		start = size - window
++	}
++	buf := make([]byte, size-start)
++	if _, err := f.ReadAt(buf, start); err != nil && len(buf) == 0 {
++		return []string{}
++	}
++	lines := strings.Split(string(buf), "\n")
++	// 去掉末尾空行
++	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
++		lines = lines[:len(lines)-1]
++	}
++	if start > 0 && len(lines) > 0 {
++		lines = lines[1:] // 首行可能是被截断的半行
++	}
++	if len(lines) > n {
++		lines = lines[len(lines)-n:]
++	}
++	return lines
++}
