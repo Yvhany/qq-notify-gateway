@@ -132,6 +132,25 @@ Cloudflare Worker（`contrib/bootstrap-worker/`）因所在网络对 `workers.de
 - 已完成：`-bootstrap` 实战抓获 `user_openid=CFC6F9FF7E8132B866AF5483400C1CE2`
   并写入 NAS `.env`；用完后应从开放平台移除任何临时回调配置。
 
+### 运行时 OpenID 采集与目标切换（网关内置，用户触发）
+
+- **动机**：用户要求不离开系统配置页即可随时获取加密 OpenID，并在单聊/群组间切换。
+- **采集**：`POST /api/openid/listen` 启动 **60 秒**监听窗口（同一时刻至多一个；
+  `POST /api/openid/stop` 手动停止，超时自动停止；`GET /api/openid` 查状态）。
+  窗口内建立 WS 长连接（复用主 token source 与 botgo 事件链路），解析：
+  - `C2C_MESSAGE_CREATE` → `user_openid`（用户私聊机器人）
+  - `GROUP_AT_MESSAGE_CREATE` → `group_openid`（群内 @机器人）
+  - `GROUP_ADD_ROBOT` → `group_openid`（拉机器人进群；经 Plain 透传 handler
+    兜底解析，字段缺失则静默忽略——拉群后 @ 一句必中）
+  - 每次抓获即经现有 WS hub 广播 `{"type":"openid","data":{kind,id,at}}` 并累积
+    于监听状态（c2c/group 各留最新值），页面实时显示。
+- **目标切换**：`PUT /api/target` `{target_type: "c2c"|"group", target_openid}`，
+  校验后更新**共享可变目标状态**（QQClient 每次发送取快照，读写有锁），并持久化到
+  `DATA_DIR/webui.json`（与公网域名同文件）；启动时 LoadConfig 后以该状态覆盖，
+  重启保持。`.env` 仅作初始默认值，不再要求手改。
+- **窗口语义**：仅在用户点击后的 60 秒内接收事件；其余时间主进程不建立事件连接
+  （S3 的“零接收”承诺除该显式窗口外继续成立）。
+
 ### Docker 与 NAS 部署
 
 - 多阶段构建：`golang:1.27-alpine`（`go mod download` → `go build -trimpath`）→
@@ -154,7 +173,8 @@ Cloudflare Worker（`contrib/bootstrap-worker/`）因所在网络对 `workers.de
 
 - NapCat / OneBot / Go-cqhttp / Apprise / message-pusher 等个人号或聚合方案。
 - **主运行模式**接收 QQ 事件、WebSocket、频道(guild)消息、被动回复
-  （`-bootstrap` 一次性模式为唯一例外，抓完即退）。
+  （例外仅两处且有界：`-bootstrap` 一次性模式；用户点击触发的 60 秒运行时
+  OpenID 采集窗口——见 S2，窗口外零接收）。
 - 消息持久化队列/重试存储（失败即 502，由调用方决定重试）。
 - 多目标路由、@特定成员、markdown/键盘等富文本。
 - Cloudflare 中转主链路（Worker 仅用于一次性 bootstrap）。
@@ -188,8 +208,12 @@ Cloudflare Worker（`contrib/bootstrap-worker/`）因所在网络对 `workers.de
 3. **WebHook 接入**：展示入站端点（**公网域名可编辑**——见下）、body 模板
    （一键复制）与最近事件；不展示 WebSocket 端点。
 4. **系统日志**（新增页）：`logs/gateway.log` 尾部 + WS 实时追加。
-5. **系统配置**（只读）：展示全部运行配置（按用户指示**不打码**，访问控制由其
-   反代登录+防火墙承担）；另含版本与运行时长。
+5. **系统配置**（只读展示 + 两处显式可写）：全量运行配置（按用户指示**不打码**，
+   访问控制由其反代登录+防火墙承担）、版本与运行时长；另含：
+   - **三月七小助手接入指引**：四字段（接收地址/请求方法/请求头/请求体）现值与
+     可复制模板（对齐小助手内嵌教程，规避 `message` 键名与 multipart 两坑）；
+   - **OpenID 采集面板**：一键 60 秒监听（发消息/拉群/@ 均可被抓）、实时显示
+     抓到的 c2c/group、单聊↔群组切换并保存（见 S2 目标切换）。
 
 ### 数据与 API 契约
 
@@ -233,3 +257,5 @@ WebSocket 入站、签名校验、消息模板页、渠道管理页（仅 QQ 单
 - [x] T8: 交付调用方配置 — acceptance: 给出三月七小助手 Webhook 渠道完整配置（URL/headers/body 模板）并经一次真实推送验证 (covers: S1; depends: T7)
 - [x] T9: Web UI 实现 — acceptance: 五页 + WS 实时可用；记录页四列/截断/图缩略符合 S4；域名可保存；`go build/vet/test` 全绿 (covers: S4; depends: T1,T2,T3,T6)
 - [x] T10: UI 挂卷部署与端到端验证 — acceptance: NAS 挂 `./data` 卷后真实推送实时入表且图片可点开；容器重启记录/日志/域名仍在 (covers: S4; depends: T9)
+- [ ] T11: 运行时 OpenID 采集与目标切换 — acceptance: `POST /api/openid/listen` 60s 窗口内私聊/@/拉群均可抓取并经 WS 实时广播；`PUT /api/target` 切换单聊/群组后新推送走新目标，重启后仍生效 (covers: S2 运行时采集; depends: T9)
+- [ ] T12: 系统配置页指引与采集 UI — acceptance: 四字段接入指引可复制；监听按钮/倒计时/抓取结果/目标切换 UI 与后端联调通过 (covers: S4 系统配置; depends: T11)

@@ -146,7 +146,7 @@ func TestUploadImageFlow(t *testing.T) {
 		AppID: "a", Secret: "s", TargetType: "c2c",
 		TargetOpenID: "OPENID_TEST", APIBase: mock.URL,
 	}
-	qq := NewQQClient(cfg, staticTokenSource{}, 5*time.Second)
+	qq := NewQQClient(cfg, staticTokenSource{}, 5*time.Second, newTargetState(cfg.TargetType, cfg.TargetOpenID))
 	fileInfo, err := qq.UploadImage(t.Context(), "notify.jpg", data)
 	if err != nil {
 		t.Fatalf("上传失败: %v", err)
@@ -203,7 +203,7 @@ func TestUploadThenSendImage(t *testing.T) {
 	defer mock.Close()
 
 	cfg := Config{AppID: "a", Secret: "s", TargetType: "c2c", TargetOpenID: "OPENID_TEST", APIBase: mock.URL}
-	qq := NewQQClient(cfg, staticTokenSource{}, 5*time.Second)
+	qq := NewQQClient(cfg, staticTokenSource{}, 5*time.Second, newTargetState(cfg.TargetType, cfg.TargetOpenID))
 	img := pngMagic(64) // 恰好一个分片
 	fi, err := qq.UploadImage(t.Context(), "n.png", img)
 	if err != nil {
@@ -229,7 +229,7 @@ func TestUploadPrepareHTTPError(t *testing.T) {
 	defer mock.Close()
 
 	cfg := Config{AppID: "a", Secret: "s", TargetType: "c2c", TargetOpenID: "OPENID_TEST", APIBase: mock.URL}
-	qq := NewQQClient(cfg, staticTokenSource{}, 5*time.Second)
+	qq := NewQQClient(cfg, staticTokenSource{}, 5*time.Second, newTargetState(cfg.TargetType, cfg.TargetOpenID))
 	_, err := qq.UploadImage(t.Context(), "n.png", []byte{0x89, 'P', 'N', 'G'})
 	if err == nil {
 		t.Fatal("期望错误")
@@ -250,7 +250,7 @@ func TestSendTextBusinessError(t *testing.T) {
 	}))
 	defer mock.Close()
 	cfg := Config{AppID: "a", Secret: "s", TargetType: "c2c", TargetOpenID: "OPENID_TEST", APIBase: mock.URL}
-	qq := NewQQClient(cfg, staticTokenSource{}, 5*time.Second)
+	qq := NewQQClient(cfg, staticTokenSource{}, 5*time.Second, newTargetState(cfg.TargetType, cfg.TargetOpenID))
 	err := qq.SendText(t.Context(), "hello")
 	var apiErr *QQAPIError
 	if !errors.As(err, &apiErr) || apiErr.Code != 40034100 {

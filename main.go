@@ -46,7 +46,19 @@ func main() {
 		hub.Broadcast("record", rec)
 		hub.Broadcast("stats", store.Stats())
 	})
-	ui := newWebUI(cfg, store, hub, dataDir)
+
+	// 推送目标：.env 为初始值，数据卷 webui.json 的持久化目标优先（重启保持）
+	target := newTargetState(cfg.TargetType, cfg.TargetOpenID)
+	if st := loadStateFrom(dataDir); st.TargetOpenID != "" {
+		typ := st.TargetType
+		if typ == "" {
+			typ = cfg.TargetType
+		}
+		if err := target.Update(typ, st.TargetOpenID); err == nil {
+			log.Printf("已加载持久化推送目标: type=%s id=%s", typ, st.TargetOpenID)
+		}
+	}
+	listener := newOpenIDListener(hub)
 
 	// botgo token source：atomic 缓存 + singleflight + 后台自动刷新
 	tokenSource := token.NewQQBotTokenSource(&token.QQBotCredentials{
@@ -57,7 +69,8 @@ func main() {
 		log.Fatalf("初始化 AccessToken 失败: %v", err)
 	}
 
-	qq := NewQQClient(cfg, tokenSource, 60*time.Second)
+	qq := NewQQClient(cfg, tokenSource, 60*time.Second, target)
+	ui := newWebUI(cfg, store, hub, dataDir, target, qq, listener)
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           newMux(cfg, qq, ui),

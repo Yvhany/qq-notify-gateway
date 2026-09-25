@@ -38,23 +38,29 @@ type QQClient struct {
 	cfg    Config
 	tokens oauth2.TokenSource
 	http   *http.Client
+	target *targetState // 运行时可切换的推送目标
 }
 
 // NewQQClient 创建客户端。timeout 为单次 HTTP 调用上限。
-func NewQQClient(cfg Config, tokens oauth2.TokenSource, timeout time.Duration) *QQClient {
+func NewQQClient(cfg Config, tokens oauth2.TokenSource, timeout time.Duration, target *targetState) *QQClient {
+	if target == nil {
+		target = newTargetState(cfg.TargetType, cfg.TargetOpenID)
+	}
 	return &QQClient{
 		cfg:    cfg,
 		tokens: tokens,
 		http:   &http.Client{Timeout: timeout},
+		target: target,
 	}
 }
 
-// targetPrefix 按目标类型返回 /v2/users/{openid} 或 /v2/groups/{openid}。
+// targetPrefix 按当前目标快照返回 /v2/users/{openid} 或 /v2/groups/{openid}。
 func (c *QQClient) targetPrefix() string {
-	if c.cfg.TargetType == "group" {
-		return "/v2/groups/" + c.cfg.TargetOpenID
+	typ, id := c.target.Snapshot()
+	if typ == "group" {
+		return "/v2/groups/" + id
 	}
-	return "/v2/users/" + c.cfg.TargetOpenID
+	return "/v2/users/" + id
 }
 
 func (c *QQClient) authorize(req *http.Request) error {
@@ -65,6 +71,40 @@ func (c *QQClient) authorize(req *http.Request) error {
 	req.Header.Set("Authorization", "QQBot "+tok.AccessToken)
 	req.Header.Set("X-Union-Appid", c.cfg.AppID)
 	return nil
+}
+
+// rawToken 返回当前 AccessToken（WS Identify 用）。
+func (c *QQClient) rawToken() (string, error) {
+	tok, err := c.tokens.Token()
+	if err != nil {
+		return "", fmt.Errorf("获取 AccessToken 失败: %w", err)
+	}
+	return tok.AccessToken, nil
+}
+
+// gatewayURL 获取 WS 长连接接入点（运行时 OpenID 采集用）。
+func (c *QQClient) gatewayURL(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.cfg.APIBase+"/gateway/bot", nil)
+	if err != nil {
+		return "", err
+	}
+	if err := c.authorize(req); err != nil {
+		return "", err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("获取 WS 接入点失败: %w", err)
+	}
+	var out struct {
+		URL string `json:"url"`
+	}
+	if err := parseQQResponse(resp, &out); err != nil {
+		return "", err
+	}
+	if out.URL == "" {
+		return "", fmt.Errorf("WS 接入点为空")
+	}
+	return out.URL, nil
 }
 
 // postJSON 向 APIBase+path 发送带鉴权的 JSON POST。

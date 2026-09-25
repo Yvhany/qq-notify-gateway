@@ -45,13 +45,14 @@ func newTestEnv(t *testing.T, targetType string, qqHandler http.HandlerFunc) *te
 		ListenAddr:   ":0",
 		APIBase:      mock.URL,
 	}
-	qq := NewQQClient(cfg, staticTokenSource{}, 5*time.Second)
+	qq := NewQQClient(cfg, staticTokenSource{}, 5*time.Second, newTargetState(cfg.TargetType, cfg.TargetOpenID))
 	store, err := NewRecordStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	hub := NewHub()
-	ui := newWebUI(cfg, store, hub, t.TempDir())
+	listener := newOpenIDListener(hub)
+	ui := newWebUI(cfg, store, hub, t.TempDir(), qq.target, qq, listener)
 	return &testEnv{qqMock: mock, cfg: cfg, qq: qq, store: store, ui: ui, handler: newMux(cfg, qq, ui)}
 }
 
