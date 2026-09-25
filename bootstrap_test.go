@@ -3,23 +3,24 @@ package main
 import "testing"
 
 func TestExtractOpenID(t *testing.T) {
-	c2c := []byte(`{"author":{"id":"1","user_openid":"OID_C2C_123"},"content":"hello","msg_id":"m1"}`)
-	if got := extractOpenID("c2c", c2c); got != "OID_C2C_123" {
+	// 真实帧结构：op/t/d 包裹
+	c2cFrame := []byte(`{"op":0,"s":2,"t":"C2C_MESSAGE_CREATE","d":{"author":{"bot":false,"user_openid":"OID_C2C_123"},"content":"hello","message_type":0}}`)
+	if got := extractOpenID("c2c", c2cFrame); got != "OID_C2C_123" {
 		t.Errorf("c2c openid 错误: %q", got)
 	}
 
-	group := []byte(`{"group_openid":"OID_GROUP_9","author":{"user_openid":"X"},"content":"@bot hi"}`)
-	if got := extractOpenID("group", group); got != "OID_GROUP_9" {
+	groupFrame := []byte(`{"op":0,"s":3,"t":"GROUP_AT_MESSAGE_CREATE","d":{"group_openid":"OID_GROUP_9","author":{"user_openid":"X"},"content":"@bot hi"}}`)
+	if got := extractOpenID("group", groupFrame); got != "OID_GROUP_9" {
 		t.Errorf("group openid 错误: %q", got)
 	}
 
-	if got := extractOpenID("c2c", []byte(`{"author":{}}`)); got != "" {
+	if got := extractOpenID("c2c", []byte(`{"d":{"author":{}}}`)); got != "" {
 		t.Errorf("缺失字段应返回空，得到 %q", got)
 	}
 	if got := extractOpenID("c2c", []byte(`not-json`)); got != "" {
 		t.Errorf("坏 JSON 应返回空，得到 %q", got)
 	}
-	if got := extractOpenID("group", []byte(`{}`)); got != "" {
-		t.Errorf("空对象应返回空，得到 %q", got)
+	if got := extractOpenID("group", []byte(`{"op":0}`)); got != "" {
+		t.Errorf("缺 d 字段应返回空，得到 %q", got)
 	}
 }
