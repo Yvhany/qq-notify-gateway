@@ -1,5 +1,8 @@
 # qq-notify-gateway
 
+> **专为 [March7Assistant](https://github.com/moesnow/March7thAssistant)（三月七小助手）优化** —— Webhook 四字段开箱即用，`{title}/{content}/{image}` 占位符直连小助手「消息推送 → Webhook」渠道，截图自动分片上传至 QQ。
+
+
 Webhook 网关：接收外部 HTTP POST 通知（文本 + base64 图片），单程序一步转换为 QQ 开放平台机器人 API v2 消息，单向推送至单聊 / 群聊，并自带 Deliver 风格 Web 管理界面。
 
 - 纯出站调用 QQ OpenAPI，主运行模式不接收 QQ 事件（openid 通过一次性 `-bootstrap` 获取）
