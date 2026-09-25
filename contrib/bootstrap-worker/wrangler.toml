@@ -1,0 +1,7 @@
+name = "qq-openid-bootstrap"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# Secrets（不入仓库，部署时用 wrangler secret put 设置）：
+#   QQ_CLIENT_SECRET - QQ 机器人 AppSecret（Ed25519 验签与挑战回签）
+#   PATH_SECRET      - 随机 URL 路径，防止被枚举

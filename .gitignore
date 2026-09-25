@@ -11,6 +11,10 @@ dist/
 # go
 vendor/
 
+# node (bootstrap worker)
+node_modules/
+.wrangler/
+
 # editor / os
 .idea/
 .vscode/
