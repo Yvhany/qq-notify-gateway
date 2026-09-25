@@ -4,6 +4,7 @@ import (
 	"embed"
 	"encoding/json"
 	"io/fs"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -19,11 +20,12 @@ var webuiFS embed.FS
 
 var version = "dev"
 
-// stateFile 持久化的 UI/目标状态（DATA_DIR/webui.json）。
+// stateFile 持久化的 UI/目标/Token 状态（DATA_DIR/webui.json）。
 type stateFile struct {
 	WebhookURL   string `json:"webhook_url"`
 	TargetType   string `json:"target_type,omitempty"`
 	TargetOpenID string `json:"target_openid,omitempty"`
+	GatewayToken string `json:"gateway_token,omitempty"`
 }
 
 // webUI 聚合 Web 界面所需依赖与状态。
@@ -38,9 +40,10 @@ type webUI struct {
 	target   *targetState
 	qq       *QQClient
 	listener *openIDListener
+	token    *tokenState
 }
 
-func newWebUI(cfg Config, store *RecordStore, hub *Hub, dataDir string, target *targetState, qq *QQClient, listener *openIDListener) *webUI {
+func newWebUI(cfg Config, store *RecordStore, hub *Hub, dataDir string, target *targetState, qq *QQClient, listener *openIDListener, tok *tokenState) *webUI {
 	return &webUI{
 		cfg:      cfg,
 		store:    store,
@@ -51,6 +54,7 @@ func newWebUI(cfg Config, store *RecordStore, hub *Hub, dataDir string, target *
 		target:   target,
 		qq:       qq,
 		listener: listener,
+		token:    tok,
 	}
 }
 
@@ -99,9 +103,9 @@ func (u *webUI) handleConfig(w http.ResponseWriter, _ *http.Request) {
 			"listen_addr":    u.cfg.ListenAddr,
 			"app_id":         u.cfg.AppID,
 			"app_secret":     u.cfg.Secret,
-			"gateway_token":  u.cfg.GatewayToken,
 			"data_dir":       u.dataDir,
 			"webhook_url":    st.WebhookURL,
+			"gateway_token":  u.token.Snapshot(),
 			"version":        version,
 			"uptime_seconds": int(time.Since(u.started).Seconds()),
 			"ws_clients":     u.hub.ClientCount(),
@@ -167,11 +171,37 @@ func (u *webUI) loadState() stateFile {
 
 // saveState 写入持久化状态文件。
 func (u *webUI) saveState(st stateFile) error {
+	return saveStateTo(u.dataDir, st)
+}
+
+// saveStateTo 包级写入（main 启动时生成 token 用）。
+func saveStateTo(dataDir string, st stateFile) error {
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(u.statePat, data, 0o644)
+	return os.WriteFile(filepath.Join(dataDir, "webui.json"), data, 0o644)
+}
+
+// handleTokenReset 重置入站校验 token：先持久化，成功后才替换内存。
+func (u *webUI) handleTokenReset(w http.ResponseWriter, _ *http.Request) {
+	candidate, err := randomToken()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	u.stateMu.Lock()
+	st := u.loadState()
+	st.GatewayToken = candidate
+	saveErr := u.saveState(st)
+	u.stateMu.Unlock()
+	if saveErr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": saveErr.Error()})
+		return
+	}
+	u.token.Set(candidate)
+	log.Printf("入站校验 token 已重置")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "token": candidate})
 }
 
 // loadStateFrom 包级读取（main 启动时应用目标覆盖）。

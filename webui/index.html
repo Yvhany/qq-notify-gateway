@@ -212,7 +212,7 @@ pre.code{font-family:ui-monospace,monospace;font-size:12px;background:#fafafa;bo
           <div class="card-b">
             <div class="form-row"><div class="lbl">接收地址</div><div class="ctl"><span class="mono" id="guideUrl" style="flex:1;word-break:break-all">–</span><button class="btn sm" onclick="copyText(document.getElementById('guideUrl').textContent,'地址')">复制</button></div></div>
             <div class="form-row"><div class="lbl">请求方法</div><div class="ctl"><span class="mono">留空（默认 POST，勿改）</span></div></div>
-            <div class="form-row"><div class="lbl">请求头</div><div class="ctl"><span class="mono">留空（无需认证头）</span></div></div>
+            <div class="form-row"><div class="lbl">请求头（校验 token，必填）</div><div class="ctl"><span class="mono" id="guideHeader" style="flex:1;word-break:break-all">–</span><button class="btn sm" onclick="copyText(document.getElementById('guideHeader').textContent,'请求头')">复制</button><button class="btn sm" onclick="resetToken()">重置</button></div></div>
             <div class="form-row" style="border-bottom:none"><div class="lbl">请求体（必填）</div><div class="ctl" style="flex-direction:column;align-items:stretch;gap:8px">
               <pre class="code" id="guideBody" style="margin:0">{"title":"{title}","content":"{content}","image":"{image}"}</pre>
               <div><button class="btn sm" onclick="copyText(document.getElementById('guideBody').textContent,'请求体模板')">复制请求体</button>
@@ -398,6 +398,7 @@ async function loadConfig(){
     }).join('');
     // 接入指引：优先已保存的公网域名，否则本机地址
     document.getElementById('guideUrl').textContent=c.webhook_url||((location.origin.replace(/\/$/,''))+'/notify');
+    document.getElementById('guideHeader').textContent=c.gateway_token?('{\"X-Gateway-Token\":\"'+c.gateway_token+'\"}'):'（token 未初始化）';
     // 目标切换表单回填
     document.getElementById('targetInput').value=c.target_openid||'';
     document.querySelectorAll('input[name=ttype]').forEach(function(r){r.checked=(r.value===c.target_type)});
@@ -461,6 +462,17 @@ async function saveTarget(){
   }catch(e){toast('网络错误，保存失败')}
 }
 async function jpost(u){var r=await fetch(u,{method:'POST'});return r.json()}
+
+/* ===== 入站 token 重置 ===== */
+async function resetToken(){
+  if(!confirm('重置后旧 token 立即失效，仍在用旧请求头的推送会 401。确定重置？'))return;
+  try{
+    var d=await jpost('/api/token/reset');
+    if(!d.ok){toast(d.error||'重置失败');return}
+    toast('已重置，记得复制新请求头更新小助手');
+    loadConfig();
+  }catch(e){toast('网络错误，重置失败')}
+}
 
 /* ===== 系统日志 ===== */
 var logLines=[],logPinned=true;

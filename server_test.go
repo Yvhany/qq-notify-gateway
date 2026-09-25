@@ -29,6 +29,7 @@ type testEnv struct {
 	qq      *QQClient
 	store   *RecordStore
 	ui      *webUI
+	tok     *tokenState
 	handler http.Handler
 }
 
@@ -52,8 +53,8 @@ func newTestEnv(t *testing.T, targetType string, qqHandler http.HandlerFunc) *te
 	}
 	hub := NewHub()
 	listener := newOpenIDListener(hub)
-	ui := newWebUI(cfg, store, hub, t.TempDir(), qq.target, qq, listener)
-	return &testEnv{qqMock: mock, cfg: cfg, qq: qq, store: store, ui: ui, handler: newMux(cfg, qq, ui)}
+	ui := newWebUI(cfg, store, hub, t.TempDir(), qq.target, qq, listener, newTokenState(""))
+	return &testEnv{qqMock: mock, cfg: cfg, qq: qq, store: store, ui: ui, tok: ui.token, handler: newMux(ui.token, qq, ui)}
 }
 
 func notifyReq(body, gatewayToken string) *http.Request {
@@ -141,8 +142,8 @@ func TestNotifyAuthRequired(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"id":"m"}`))
 	})
-	env.cfg.GatewayToken = "sekrit"
-	env.handler = newMux(env.cfg, env.qq, env.ui)
+	// 设置 token 后：句柄与 handler 共享同一 tokenState，无需重建路由
+	env.tok.Set("sekrit")
 
 	if code, _ := doJSON(t, env.handler, notifyReq(`{"content":"x"}`, "")); code != http.StatusUnauthorized {
 		t.Errorf("无 token 期望 401，得到 %d", code)
@@ -158,6 +159,57 @@ func TestNotifyAuthRequired(t *testing.T) {
 	}
 	if n := calls.Load(); n != 1 {
 		t.Errorf("期望调用 QQ 1 次，实际 %d 次", n)
+	}
+}
+
+// TestTokenLifecycle 校验 token 的生成展示、重置与持久化闭环。
+func TestTokenLifecycle(t *testing.T) {
+	env := newTestEnv(t, "c2c", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"m"}`))
+	})
+	env.tok.Set("old-token-abc")
+
+	// config 展示生效 token
+	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	rec := httptest.NewRecorder()
+	env.handler.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), "old-token-abc") {
+		t.Errorf("/api/config 应展示 token: %s", rec.Body.String())
+	}
+
+	// 旧 token 可用
+	if code, _ := doJSON(t, env.handler, notifyReq(`{"content":"x"}`, "old-token-abc")); code != 200 {
+		t.Errorf("旧 token 应 200，得到 %d", code)
+	}
+
+	// 重置
+	req2 := httptest.NewRequest(http.MethodPost, "/api/token/reset", nil)
+	rec2 := httptest.NewRecorder()
+	env.handler.ServeHTTP(rec2, req2)
+	if rec2.Code != 200 {
+		t.Fatalf("reset = %d: %s", rec2.Code, rec2.Body.String())
+	}
+	var resp struct {
+		OK    bool   `json:"ok"`
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &resp); err != nil || !resp.OK || resp.Token == "" || resp.Token == "old-token-abc" {
+		t.Fatalf("reset 响应异常: %s", rec2.Body.String())
+	}
+
+	// 旧 token 失效、新 token 生效
+	if code, _ := doJSON(t, env.handler, notifyReq(`{"content":"x"}`, "old-token-abc")); code != 401 {
+		t.Errorf("重置后旧 token 应 401，得到 %d", code)
+	}
+	if code, _ := doJSON(t, env.handler, notifyReq(`{"content":"x"}`, resp.Token)); code != 200 {
+		t.Errorf("新 token 应 200，得到 %d", code)
+	}
+
+	// 持久化：新 token 落盘
+	st := loadStateFrom(env.ui.dataDir)
+	if st.GatewayToken != resp.Token {
+		t.Errorf("持久化 token 不一致: %q", st.GatewayToken)
 	}
 }
 

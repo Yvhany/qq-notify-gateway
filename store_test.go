@@ -116,8 +116,8 @@ func TestNotifyWritesRecordAndImage(t *testing.T) {
 	store, _ := NewRecordStore(t.TempDir())
 	hub := NewHub()
 	listener := newOpenIDListener(hub)
-	ui := newWebUI(cfg, store, hub, t.TempDir(), qq.target, qq, listener)
-	handler := newMux(cfg, qq, ui)
+	ui := newWebUI(cfg, store, hub, t.TempDir(), qq.target, qq, listener, newTokenState(""))
+	handler := newMux(ui.token, qq, ui)
 
 	img := pngMagic(64)
 	body := `{"title":"标题","content":"内容正文","source":"三月七小助手","image":"` + base64PNG(img) + `"}`
