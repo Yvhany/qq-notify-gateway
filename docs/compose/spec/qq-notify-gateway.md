@@ -98,7 +98,8 @@ Cloudflare Worker（`contrib/bootstrap-worker/`）因所在网络对 `workers.de
 | `QQ_APP_ID` / `QQ_SECRET` | 是 | 开放平台 AppID / AppSecret |
 | `TARGET_TYPE` | 是 | `c2c` 或 `group` |
 | `TARGET_OPENID` | 是 | 单聊 `user_openid` 或群 `group_openid`（bootstrap 抓取） |
-| `LISTEN_ADDR` | 否 | 默认 `:8080` |
+| `LISTEN_ADDR` | 否 | 默认 `:8080`（API 口，仅 /notify） |
+| `UI_LISTEN_ADDR` | 否 | 默认 `:8081`（UI 口）；置空禁用 Web UI |
 | `QQ_API_BASE` | 否 | 默认 `https://api.sgroup.qq.com`（可指向 mock 测试） |
 | `QQ_SANDBOX` | 否 | `true` 时使用 sandbox API 域名，默认 `false` |
 | `GATEWAY_TOKEN` | 否 | 入站鉴权，见上 |
@@ -163,6 +164,17 @@ Cloudflare Worker（`contrib/bootstrap-worker/`）因所在网络对 `workers.de
   重启保持。`.env` 仅作初始默认值，不再要求手改。
 - **窗口语义**：仅在用户点击后的 60 秒内接收事件；其余时间主进程不建立事件连接
   （S3 的“零接收”承诺除该显式窗口外继续成立）。
+
+### 双端口拆分（API 与 UI 分离，用户要求）
+
+- **API 口**（`LISTEN_ADDR`，默认 `:8080`，容器映射 `18080`）：**仅** `POST /notify`
+  （token 校验），其余路径 404；反代对该口/路径**整口免登录放行**，安全性由 token 承担。
+- **UI 口**（`UI_LISTEN_ADDR`，默认 `:8081`，容器映射 `18081`；置空禁用）：
+  页面、`/api/*`、WS；`/notify` 在此口 404（防打错口“假成功”）。该口由用户反代的
+  登录验证整体保护，网关不加 UI 鉴权（用户明确：UI 加密由其反代软件负责）。
+- 实现：共享同一 mux，`routeFilter` 按路径裁剪出两份 handler，单进程双
+  `http.Server` 监听；两个口共享 store/hub/token/target（API 收到的记录经同一
+  hub 实时广播到 UI 的 WS）。
 
 ### Docker 与 NAS 部署
 
@@ -275,3 +287,4 @@ WebSocket 入站、签名校验、消息模板页、渠道管理页（仅 QQ 单
 - [x] T11: 运行时 OpenID 采集与目标切换 — acceptance: `POST /api/openid/listen` 60s 窗口内私聊/@/拉群均可抓取并经 WS 实时广播；`PUT /api/target` 切换单聊/群组后新推送走新目标，重启后仍生效 (covers: S2 运行时采集; depends: T9)
 - [x] T12: 系统配置页指引与采集 UI — acceptance: 四字段接入指引可复制；监听按钮/倒计时/抓取结果/目标切换 UI 与后端联调通过 (covers: S4 系统配置; depends: T11)
 - [ ] T13: 入站校验 Token — acceptance: 首启自动生成并持久化；无/错 token 401、正确 token 200；重置后旧失效新生效且重启保持；指引页可复制/重置；`go test` 全绿 (covers: S2 入站鉴权; depends: T1)
+- [ ] T14: API/UI 双端口分离 — acceptance: 18080 仅 /notify（无 token 401、/api 404）；18081 提供 UI 全功能且 /notify 404；两口共享记录/WS 实时；`docker compose config` 含双端口映射 (covers: S2 双端口拆分; depends: T13)

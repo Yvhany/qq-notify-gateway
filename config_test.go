@@ -25,6 +25,9 @@ func TestLoadConfigValid(t *testing.T) {
 	if cfg.ListenAddr != ":8080" {
 		t.Errorf("默认端口错误: %q", cfg.ListenAddr)
 	}
+	if cfg.UIListenAddr != ":8081" {
+		t.Errorf("默认 UI 端口错误: %q", cfg.UIListenAddr)
+	}
 	if cfg.APIBase != "https://api.sgroup.qq.com" {
 		t.Errorf("默认 API 域名错误: %q", cfg.APIBase)
 	}

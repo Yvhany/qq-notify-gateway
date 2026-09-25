@@ -396,8 +396,8 @@ async function loadConfig(){
     document.getElementById('cfgRows').innerHTML=rows.map(function(r){
       return '<div class="form-row"><div class="lbl">'+r[0]+'</div><div class="ctl">'+r[1]+'</div></div>';
     }).join('');
-    // 接入指引：优先已保存的公网域名，否则本机地址
-    document.getElementById('guideUrl').textContent=c.webhook_url||((location.origin.replace(/\/$/,''))+'/notify');
+    // 接入指引：优先已保存的公网域名；否则按 API 口标准映射(18080)给出示例
+    document.getElementById('guideUrl').textContent=c.webhook_url||(location.protocol+'//'+location.hostname+':18080/notify');
     document.getElementById('guideHeader').textContent=c.gateway_token?('{\"X-Gateway-Token\":\"'+c.gateway_token+'\"}'):'（token 未初始化）';
     // 目标切换表单回填
     document.getElementById('targetInput').value=c.target_openid||'';

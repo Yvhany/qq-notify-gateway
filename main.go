@@ -102,22 +102,66 @@ func main() {
 
 	qq := NewQQClient(cfg, tokenSource, 60*time.Second, target)
 	ui := newWebUI(cfg, store, hub, dataDir, target, qq, listener, tok)
-	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
-		Handler:           newMux(tok, qq, ui),
+	core := newMux(tok, qq, ui)
+
+	// 双端口拆分：
+	//   API 口（LISTEN_ADDR）   —— 仅 POST /notify，token 校验；反代可整口免登录放行
+	//   UI  口（UI_LISTEN_ADDR）—— 页面/统计/记录/日志/WS；由反代登录保护，网关不再加鉴权
+	apiSrv := &http.Server{
+		Addr: cfg.ListenAddr,
+		Handler: routeFilter(core, func(r *http.Request) bool {
+			return r.URL.Path == "/notify"
+		}),
 		ReadHeaderTimeout: 10 * time.Second,
+	}
+	var uiSrv *http.Server
+	if cfg.UIListenAddr != "" {
+		uiSrv = &http.Server{
+			Addr: cfg.UIListenAddr,
+			Handler: routeFilter(core, func(r *http.Request) bool {
+				return r.URL.Path != "/notify"
+			}),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
 	}
 
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
+		_ = apiSrv.Shutdown(shutdownCtx)
+		if uiSrv != nil {
+			_ = uiSrv.Shutdown(shutdownCtx)
+		}
 	}()
 
-	log.Printf("qq-notify-gateway 监听 %s，目标=%s openid=%s api=%s",
-		cfg.ListenAddr, cfg.TargetType, cfg.TargetOpenID, cfg.APIBase)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	typ, id := target.Snapshot()
+	log.Printf("API(推送)监听 %s —— 仅 POST /notify，token 校验", cfg.ListenAddr)
+	if uiSrv != nil {
+		log.Printf("UI 监听 %s —— 页面/记录/日志/WS（由反代登录保护）", cfg.UIListenAddr)
+	} else {
+		log.Printf("UI 监听已禁用（UI_LISTEN_ADDR 为空）")
+	}
+	log.Printf("目标=%s openid=%s api=%s", typ, id, cfg.APIBase)
+
+	errCh := make(chan error, 2)
+	go func() {
+		if err := apiSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+	}()
+	if uiSrv != nil {
+		go func() {
+			if err := uiSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
+	}
+
+	select {
+	case err := <-errCh:
 		log.Fatalf("服务退出: %v", err)
+	case <-ctx.Done():
+		log.Println("收到退出信号，正在关闭服务")
 	}
 }

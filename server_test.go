@@ -213,6 +213,41 @@ func TestTokenLifecycle(t *testing.T) {
 	}
 }
 
+// TestRouteFilterPortSplit 双端口路由裁剪：API 口只放 /notify，UI 口屏蔽 /notify。
+func TestRouteFilterPortSplit(t *testing.T) {
+	env := newTestEnv(t, "c2c", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"id":"m"}`))
+	})
+	env.tok.Set("split-test-token") // 非空才走校验
+	apiH := routeFilter(env.handler, func(r *http.Request) bool { return r.URL.Path == "/notify" })
+	uiH := routeFilter(env.handler, func(r *http.Request) bool { return r.URL.Path != "/notify" })
+
+	// API 口：/notify 放行（无 token → 401，证明进入了处理链），/api 拒绝
+	rec := httptest.NewRecorder()
+	apiH.ServeHTTP(rec, notifyReq(`{"content":"x"}`, ""))
+	if rec.Code != 401 {
+		t.Errorf("API 口 /notify 期望 401(无token)，得到 %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	apiH.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if rec.Code != 404 {
+		t.Errorf("API 口 /api 期望 404，得到 %d", rec.Code)
+	}
+
+	// UI 口：/api 放行，/notify 拒绝
+	rec = httptest.NewRecorder()
+	uiH.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/stats", nil))
+	if rec.Code != 200 {
+		t.Errorf("UI 口 /api 期望 200，得到 %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	uiH.ServeHTTP(rec, notifyReq(`{"content":"x"}`, ""))
+	if rec.Code != 404 {
+		t.Errorf("UI 口 /notify 期望 404，得到 %d", rec.Code)
+	}
+}
+
 func TestNotifyBadRequests(t *testing.T) {
 	env := newTestEnv(t, "c2c", func(w http.ResponseWriter, r *http.Request) {
 		t.Error("参数错误时不应调用 QQ")
