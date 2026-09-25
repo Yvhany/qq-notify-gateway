@@ -1,5 +1,5 @@
 # qq-notify-gateway
-
+使用MimoV2.6Flash和MimoDesktop编写
 > **专为 [March7Assistant](https://github.com/moesnow/March7thAssistant)（三月七小助手）优化** —— Webhook 四字段开箱即用，`{title}/{content}/{image}` 占位符直连小助手「消息推送 → Webhook」渠道，截图自动分片上传至 QQ。
 
 
