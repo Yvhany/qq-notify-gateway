@@ -20,15 +20,22 @@ type capture struct {
 	id   string
 }
 
-// extractOpenID 从 WS 事件的原始 d 载荷里解析 openid。
+// extractOpenID 从 WS 事件帧的原始 JSON 里解析 openid。
+// 帧结构为 {"op":0,"t":"...","d":{...}}，openid 位于 d 内。
 func extractOpenID(kind string, raw []byte) string {
+	var frame struct {
+		D json.RawMessage `json:"d"`
+	}
+	if err := json.Unmarshal(raw, &frame); err != nil || len(frame.D) == 0 {
+		return ""
+	}
 	if kind == "c2c" {
 		var payload struct {
 			Author struct {
 				UserOpenID string `json:"user_openid"`
 			} `json:"author"`
 		}
-		if err := json.Unmarshal(raw, &payload); err != nil {
+		if err := json.Unmarshal(frame.D, &payload); err != nil {
 			return ""
 		}
 		return payload.Author.UserOpenID
@@ -36,7 +43,7 @@ func extractOpenID(kind string, raw []byte) string {
 	var payload struct {
 		GroupOpenID string `json:"group_openid"`
 	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
+	if err := json.Unmarshal(frame.D, &payload); err != nil {
 		return ""
 	}
 	return payload.GroupOpenID
