@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -137,7 +139,7 @@ func (l *openIDListener) run(ctx context.Context, qq *QQClient) error {
 	}()
 
 	var (
-		seq       int
+		seq       atomic.Int64 // 主循环写、心跳协程读，原子化避免数据竞争
 		hbStarted bool
 	)
 	// 心跳：hello 之后由主循环启动，确保 Identify 先发（单写者顺序：Identify → 心跳）
@@ -190,7 +192,7 @@ func (l *openIDListener) run(ctx context.Context, qq *QQClient) error {
 				go heartbeatWriter(conn, ctx, interval, &seq, stopHB)
 			}
 		case 0: // DISPATCH
-			seq = frame.S
+			seq.Store(int64(frame.S))
 			l.dispatch(frame.T, data)
 		case 11: // HEARTBEAT ACK — 忽略
 		}
@@ -231,7 +233,7 @@ func extractGroupNested(raw []byte) string {
 }
 
 // heartbeatWriter 定时心跳；写失败或窗口结束即退出。
-func heartbeatWriter(conn *websocket.Conn, ctx context.Context, interval time.Duration, seq *int, stop <-chan struct{}) {
+func heartbeatWriter(conn *websocket.Conn, ctx context.Context, interval time.Duration, seq *atomic.Int64, stop <-chan struct{}) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -242,7 +244,7 @@ func heartbeatWriter(conn *websocket.Conn, ctx context.Context, interval time.Du
 			return
 		case <-ticker.C:
 			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			if err := conn.WriteJSON(map[string]any{"op": 1, "d": *seq}); err != nil {
+			if err := conn.WriteJSON(map[string]any{"op": 1, "d": seq.Load()}); err != nil {
 				return
 			}
 		}
@@ -280,17 +282,32 @@ func (u *webUI) handleTargetPut(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "请求体无效"})
 		return
 	}
-	if err := u.target.Update(req.TargetType, req.TargetOpenID); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+	// 先做与 target.Update 相同的校验（不动内存）
+	typ := strings.ToLower(strings.TrimSpace(req.TargetType))
+	id := strings.TrimSpace(req.TargetOpenID)
+	if typ != "c2c" && typ != "group" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "目标类型必须是 c2c 或 group"})
 		return
 	}
+	if !validOpenID(id) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "OpenID 格式无效"})
+		return
+	}
+	// 落盘成功后才更新内存，保证两者一致
+	u.stateMu.Lock()
 	st := u.loadState()
-	st.TargetType, st.TargetOpenID = u.target.Snapshot()
-	if err := u.saveState(st); err != nil {
+	st.TargetType, st.TargetOpenID = typ, id
+	saveErr := u.saveState(st)
+	u.stateMu.Unlock()
+	if saveErr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": saveErr.Error()})
+		return
+	}
+	if err := u.target.Update(typ, id); err != nil {
+		// 校验已通过，理论上不可达；防御性回滚
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	typ, id := u.target.Snapshot()
 	u.hub.Broadcast("target", map[string]any{"target_type": typ, "target_openid": id})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "target_type": typ, "target_openid": id})
 }

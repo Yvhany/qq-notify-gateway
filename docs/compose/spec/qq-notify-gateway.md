@@ -137,11 +137,12 @@ Cloudflare Worker（`contrib/bootstrap-worker/`）因所在网络对 `workers.de
 - **动机**：用户要求不离开系统配置页即可随时获取加密 OpenID，并在单聊/群组间切换。
 - **采集**：`POST /api/openid/listen` 启动 **60 秒**监听窗口（同一时刻至多一个；
   `POST /api/openid/stop` 手动停止，超时自动停止；`GET /api/openid` 查状态）。
-  窗口内建立 WS 长连接（复用主 token source 与 botgo 事件链路），解析：
+  窗口内建立 WS 长连接（复用主 token source；**手写受控 WS 客户端**，不依赖
+  botgo session manager——后者无停止 API，无法保证窗口外零接收），解析：
   - `C2C_MESSAGE_CREATE` → `user_openid`（用户私聊机器人）
   - `GROUP_AT_MESSAGE_CREATE` → `group_openid`（群内 @机器人）
-  - `GROUP_ADD_ROBOT` → `group_openid`（拉机器人进群；经 Plain 透传 handler
-    兜底解析，字段缺失则静默忽略——拉群后 @ 一句必中）
+  - `GROUP_ADD_ROBOT` → `group_openid`（拉机器人进群；在自实现的 dispatch
+    分支中兜底解析，字段缺失则静默忽略——拉群后 @ 一句必中）
   - 每次抓获即经现有 WS hub 广播 `{"type":"openid","data":{kind,id,at}}` 并累积
     于监听状态（c2c/group 各留最新值），页面实时显示。
 - **目标切换**：`PUT /api/target` `{target_type: "c2c"|"group", target_openid}`，
@@ -208,8 +209,9 @@ Cloudflare Worker（`contrib/bootstrap-worker/`）因所在网络对 `workers.de
 3. **WebHook 接入**：展示入站端点（**公网域名可编辑**——见下）、body 模板
    （一键复制）与最近事件；不展示 WebSocket 端点。
 4. **系统日志**（新增页）：`logs/gateway.log` 尾部 + WS 实时追加。
-5. **系统配置**（只读展示 + 两处显式可写）：全量运行配置（按用户指示**不打码**，
-   访问控制由其反代登录+防火墙承担）、版本与运行时长；另含：
+5. **系统配置**（主体只读；两项显式例外：接入指引只读可复制、目标切换可写）：
+   全量运行配置（按用户指示**不打码**，访问控制由其反代登录+防火墙承担）、
+   版本与运行时长；另含：
    - **三月七小助手接入指引**：四字段（接收地址/请求方法/请求头/请求体）现值与
      可复制模板（对齐小助手内嵌教程，规避 `message` 键名与 multipart 两坑）；
    - **OpenID 采集面板**：一键 60 秒监听（发消息/拉群/@ 均可被抓）、实时显示

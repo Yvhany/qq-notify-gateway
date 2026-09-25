@@ -236,7 +236,7 @@ pre.code{font-family:ui-monospace,monospace;font-size:12px;background:#fafafa;bo
               <div class="ctl">
                 <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="ttype" value="c2c" checked> 单聊</label>
                 <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="radio" name="ttype" value="group"> 群组</label>
-                <input class="input" id="targetInput" placeholder="OpenID" style="flex:1;min-width:200px">
+                <input class="input" id="targetInput" placeholder="OpenID" style="flex:1;min-width:200px" oninput="targetInput._autoFilled=false">
                 <button class="btn primary" style="white-space:nowrap" onclick="saveTarget()">保存目标</button>
               </div>
             </div>
@@ -428,30 +428,37 @@ function renderOID(s){
   document.getElementById('oidGroup').textContent=s.group||'–';
 }
 async function oidListen(){
-  var d=await jpost('/api/openid/listen');
-  if(!d.ok){toast(d.error||'启动失败');return}
-  toast('监听已启动：60 秒内给机器人发消息/拉群/@它');
-  renderOID(d.state);
-  if(!oidTimer)oidTimer=setInterval(loadOpenID,1000);
+  try{
+    var d=await jpost('/api/openid/listen');
+    if(!d.ok){toast(d.error||'启动失败');return}
+    toast('监听已启动：60 秒内给机器人发消息/拉群/@它');
+    renderOID(d.state);
+    if(!oidTimer)oidTimer=setInterval(loadOpenID,1000);
+  }catch(e){toast('网络错误，启动失败')}
 }
 async function oidStop(){
-  await jpost('/api/openid/stop');
-  toast('已停止监听');setTimeout(loadOpenID,200);
+  try{
+    await jpost('/api/openid/stop');
+    toast('已停止监听');setTimeout(loadOpenID,200);
+  }catch(e){toast('网络错误，停止失败')}
 }
 function fillTarget(type,id){
   if(!id||id==='–'){toast('还没有抓到该类型 OpenID');return}
   document.querySelectorAll('input[name=ttype]').forEach(function(r){r.checked=(r.value===type)});
-  document.getElementById('targetInput').value=id;
+  var el=document.getElementById('targetInput');
+  el.value=id;el._autoFilled=true;
   toast('已填入，点击「保存目标」生效');
 }
 async function saveTarget(){
-  var type=(document.querySelector('input[name=ttype]:checked')||{}).value||'c2c';
-  var id=document.getElementById('targetInput').value.trim();
-  if(!id){toast('请填写 OpenID');return}
-  var d=await jput('/api/target',{target_type:type,target_openid:id});
-  if(!d.ok){toast('保存失败: '+(d.error||''));return}
-  toast('推送目标已切换为 '+(type==='c2c'?'单聊':'群组'));
-  loadConfig();
+  try{
+    var type=(document.querySelector('input[name=ttype]:checked')||{}).value||'c2c';
+    var id=document.getElementById('targetInput').value.trim();
+    if(!id){toast('请填写 OpenID');return}
+    var d=await jput('/api/target',{target_type:type,target_openid:id});
+    if(!d.ok){toast('保存失败: '+(d.error||''));return}
+    toast('推送目标已切换为 '+(type==='c2c'?'单聊':'群组'));
+    loadConfig();
+  }catch(e){toast('网络错误，保存失败')}
 }
 async function jpost(u){var r=await fetch(u,{method:'POST'});return r.json()}
 
@@ -486,8 +493,12 @@ function onOpenIDEvent(ev){
   }
 }
 function fillTargetSilent(type,id){
+  var el=document.getElementById('targetInput');
+  // 用户正在编辑（聚焦）或手填了非自动值时不打扰
+  if(document.activeElement===el)return;
+  if(el.value.trim() && !el._autoFilled)return;
   document.querySelectorAll('input[name=ttype]').forEach(function(r){r.checked=(r.value===type)});
-  document.getElementById('targetInput').value=id;
+  el.value=id;el._autoFilled=true;
 }
 
 /* ===== WebSocket：仅页面可见时连接 ===== */
