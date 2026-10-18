@@ -53,7 +53,7 @@ func newTestEnv(t *testing.T, targetType string, qqHandler http.HandlerFunc) *te
 	}
 	hub := NewHub()
 	listener := newOpenIDListener(hub)
-	ui := newWebUI(cfg, store, hub, t.TempDir(), qq.target, qq, listener, newTokenState(""))
+	ui := newWebUI(cfg, store, hub, t.TempDir(), qq.target, qq, listener, newTokenState(""), newRetentionState(0))
 	return &testEnv{qqMock: mock, cfg: cfg, qq: qq, store: store, ui: ui, tok: ui.token, handler: newMux(ui.token, qq, ui)}
 }
 

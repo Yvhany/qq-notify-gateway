@@ -264,7 +264,20 @@ Cloudflare Worker（`contrib/bootstrap-worker/`）因所在网络对 `workers.de
   - 连接生命周期：前端仅在页面**可见**时保持连接，`visibilitychange` 隐藏或
     页面卸载即 `close()`；服务端读循环感知断开并注销——无人观看时无连接。
   - 初次进入以 `GET /api/logs?n=` 拉尾部，之后仅靠 WS 追加。
-- **鉴权**：与 `/notify` 相同（不加 UI 专属鉴权；用户以反代登录/防火墙兜底）。
+- **保留策略与清理（记录即图片同生命周期）**：
+  - 持久化 `retention_days`（0=永久，默认 0）；`POST /api/retention {days}`
+    先落盘后生效，`days>0` 时**立即**清理更早数据；启动时清理一次，另外每 6 小时
+    定期清理。
+  - `POST /api/records/purge {older_than_days}`：`>0` 删除该天数之前的记录/图片，
+    `0` 清空全部（UI 端二次确认）。
+  - 清理实现：持锁过滤 → `records.jsonl` 原子重写（tmp+rename）→ 清扫所有不再被
+    保留记录引用的图片（含历史孤立文件）；`id` 自增单调不回退；清理经 WS 广播
+    `records_purged`/`stats`/`retention`。
+  - 记录页工具栏：保留期下拉（1个月/3个月/半年/1年/永久，切换即应用）、
+    「清除30天前」、「清空全部」（危险样式+双确认）。
+- **鉴权**：`/notify` 走 token 校验（见 S2 入站契约）；UI/`/api/*` 不加网关鉴权，
+  由用户反代登录/防火墙兜底。
+
 - **compose 变更**：`environment: {DATA_DIR: /data, TZ: Asia/Shanghai}` +
   `volumes: ["./data:/data"]`。
 
@@ -288,3 +301,4 @@ WebSocket 入站、签名校验、消息模板页、渠道管理页（仅 QQ 单
 - [x] T12: 系统配置页指引与采集 UI — acceptance: 四字段接入指引可复制；监听按钮/倒计时/抓取结果/目标切换 UI 与后端联调通过 (covers: S4 系统配置; depends: T11)
 - [ ] T13: 入站校验 Token — acceptance: 首启自动生成并持久化；无/错 token 401、正确 token 200；重置后旧失效新生效且重启保持；指引页可复制/重置；`go test` 全绿 (covers: S2 入站鉴权; depends: T1)
 - [ ] T14: API/UI 双端口分离 — acceptance: 18080 仅 /notify（无 token 401、/api 404）；18081 提供 UI 全功能且 /notify 404；两口共享记录/WS 实时；`docker compose config` 含双端口映射 (covers: S2 双端口拆分; depends: T13)
+- [ ] T15: 记录保留策略与清理 — acceptance: 保留期（1月/3月/半年/1年/永久）持久化且切换即清理；「清除30天前」「清空全部」生效且图片同步删除、id 不回退；启动与 6 小时定期清理生效；`go test` 全绿 (covers: S4 保留策略; depends: T9)

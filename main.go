@@ -89,6 +89,39 @@ func main() {
 	tok := newTokenState(tokVal)
 	log.Printf("入站校验 token 已启用（值不记入日志，可在系统配置页查看/重置）")
 
+	// 保留策略：数据卷持久化值；>0 时启动即清理一次，并每 6 小时定期清理
+	retention := newRetentionState(persisted.RetentionDays)
+	if cutoff, ok := retentionCutoff(time.Now(), persisted.RetentionDays); ok {
+		if n, err := store.PurgeBefore(cutoff); err != nil {
+			log.Printf("警告: 启动清理失败: %v", err)
+		} else if n > 0 {
+			log.Printf("保留策略 %d 天：启动清理 %d 条", persisted.RetentionDays, n)
+		}
+	}
+	store.SetOnPurge(func(n int) {
+		hub.Broadcast("records_purged", map[string]any{"removed": n})
+		hub.Broadcast("stats", store.Stats())
+	})
+	go func() {
+		t := time.NewTicker(6 * time.Hour)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				days := retention.Snapshot()
+				if cutoff, ok := retentionCutoff(time.Now(), days); ok {
+					if n, err := store.PurgeBefore(cutoff); err != nil {
+						log.Printf("定期清理失败: %v", err)
+					} else if n > 0 {
+						log.Printf("定期清理：删除 %d 条（保留 %d 天）", n, days)
+					}
+				}
+			}
+		}
+	}()
+
 	listener := newOpenIDListener(hub)
 
 	// botgo token source：atomic 缓存 + singleflight + 后台自动刷新
@@ -101,7 +134,7 @@ func main() {
 	}
 
 	qq := NewQQClient(cfg, tokenSource, 60*time.Second, target)
-	ui := newWebUI(cfg, store, hub, dataDir, target, qq, listener, tok)
+	ui := newWebUI(cfg, store, hub, dataDir, target, qq, listener, tok, retention)
 	core := newMux(tok, qq, ui)
 
 	// 双端口拆分：

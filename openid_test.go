@@ -38,7 +38,7 @@ func TestTargetStateUpdateAndPersist(t *testing.T) {
 	store, _ := NewRecordStore(t.TempDir())
 	hub := NewHub()
 	listener := newOpenIDListener(hub)
-	ui := newWebUI(cfg, store, hub, dir, target, qq, listener, newTokenState(""))
+	ui := newWebUI(cfg, store, hub, dir, target, qq, listener, newTokenState(""), newRetentionState(0))
 	handler := newMux(ui.token, qq, ui)
 
 	body := `{"target_type":"group","target_openid":"PERSIST_GROUP_1"}`

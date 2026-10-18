@@ -41,6 +41,8 @@ func newMux(tok *tokenState, qq *QQClient, ui *webUI) http.Handler {
 	mux.HandleFunc("GET /api/stats", ui.handleStats)
 	mux.HandleFunc("GET /api/records", ui.handleRecords)
 	mux.HandleFunc("GET /api/records/{id}/image", ui.handleRecordImage)
+	mux.HandleFunc("POST /api/records/purge", ui.handleRecordsPurge)
+	mux.HandleFunc("POST /api/retention", ui.handleRetentionPost)
 	mux.HandleFunc("GET /api/config", ui.handleConfig)
 	mux.HandleFunc("GET /api/logs", ui.handleLogs)
 	mux.HandleFunc("GET /api/webhook", ui.handleWebhookGet)

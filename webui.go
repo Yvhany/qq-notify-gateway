@@ -20,12 +20,13 @@ var webuiFS embed.FS
 
 var version = "dev"
 
-// stateFile 持久化的 UI/目标/Token 状态（DATA_DIR/webui.json）。
+// stateFile 持久化的 UI/目标/Token/保留策略状态（DATA_DIR/webui.json）。
 type stateFile struct {
-	WebhookURL   string `json:"webhook_url"`
-	TargetType   string `json:"target_type,omitempty"`
-	TargetOpenID string `json:"target_openid,omitempty"`
-	GatewayToken string `json:"gateway_token,omitempty"`
+	WebhookURL    string `json:"webhook_url"`
+	TargetType    string `json:"target_type,omitempty"`
+	TargetOpenID  string `json:"target_openid,omitempty"`
+	GatewayToken  string `json:"gateway_token,omitempty"`
+	RetentionDays int    `json:"retention_days,omitempty"`
 }
 
 // webUI 聚合 Web 界面所需依赖与状态。
@@ -37,24 +38,26 @@ type webUI struct {
 	started  time.Time
 	statePat string
 	stateMu  sync.Mutex // webui.json 的 load→save 互斥（webhook/target 两类写方）
-	target   *targetState
-	qq       *QQClient
-	listener *openIDListener
-	token    *tokenState
+	target    *targetState
+	qq        *QQClient
+	listener  *openIDListener
+	token     *tokenState
+	retention *retentionState
 }
 
-func newWebUI(cfg Config, store *RecordStore, hub *Hub, dataDir string, target *targetState, qq *QQClient, listener *openIDListener, tok *tokenState) *webUI {
+func newWebUI(cfg Config, store *RecordStore, hub *Hub, dataDir string, target *targetState, qq *QQClient, listener *openIDListener, tok *tokenState, retention *retentionState) *webUI {
 	return &webUI{
-		cfg:      cfg,
-		store:    store,
-		hub:      hub,
-		dataDir:  dataDir,
-		started:  time.Now(),
-		statePat: filepath.Join(dataDir, "webui.json"),
-		target:   target,
-		qq:       qq,
-		listener: listener,
-		token:    tok,
+		cfg:       cfg,
+		store:     store,
+		hub:       hub,
+		dataDir:   dataDir,
+		started:   time.Now(),
+		statePat:  filepath.Join(dataDir, "webui.json"),
+		target:    target,
+		qq:        qq,
+		listener:  listener,
+		token:     tok,
+		retention: retention,
 	}
 }
 
@@ -90,6 +93,72 @@ func (u *webUI) handleRecordImage(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, path)
 }
 
+// handleRetentionPost 应用保留策略：days>0 时立即清理更早的数据。
+func (u *webUI) handleRetentionPost(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var req struct {
+		Days int `json:"days"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "请求体无效"})
+		return
+	}
+	if req.Days < 0 || req.Days > 3650 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "保留天数需在 0-3650 之间（0=永久）"})
+		return
+	}
+	// 先落盘，成功才生效
+	u.stateMu.Lock()
+	st := u.loadState()
+	st.RetentionDays = req.Days
+	saveErr := u.saveState(st)
+	u.stateMu.Unlock()
+	if saveErr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": saveErr.Error()})
+		return
+	}
+	u.retention.Set(req.Days)
+	removed := 0
+	if cutoff, ok := retentionCutoff(time.Now(), req.Days); ok {
+		n, err := u.store.PurgeBefore(cutoff)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "策略已保存，但清理失败: " + err.Error()})
+			return
+		}
+		removed = n
+	}
+	u.hub.Broadcast("retention", map[string]any{"days": req.Days})
+	log.Printf("保留策略已应用: %d 天（立即清理 %d 条）", req.Days, removed)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "days": req.Days, "removed": removed})
+}
+
+// handleRecordsPurge 手动清理：older_than_days=0 表示清空全部。
+func (u *webUI) handleRecordsPurge(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var req struct {
+		OlderThanDays int `json:"older_than_days"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "请求体无效"})
+		return
+	}
+	if req.OlderThanDays < 0 || req.OlderThanDays > 3650 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "天数需在 0-3650 之间"})
+		return
+	}
+	cutoff := time.Now()
+	if req.OlderThanDays > 0 {
+		cutoff = time.Now().AddDate(0, 0, -req.OlderThanDays)
+	}
+	removed, err := u.store.PurgeBefore(cutoff)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	log.Printf("手动清理完成: 删除 %d 条（阈值 %d 天）", removed, req.OlderThanDays)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed})
+}
+
 // handleConfig 只读全量配置（按用户指示不打码，访问控制由反代承担）。
 func (u *webUI) handleConfig(w http.ResponseWriter, _ *http.Request) {
 	st := u.loadState()
@@ -106,6 +175,7 @@ func (u *webUI) handleConfig(w http.ResponseWriter, _ *http.Request) {
 			"data_dir":       u.dataDir,
 			"webhook_url":    st.WebhookURL,
 			"gateway_token":  u.token.Snapshot(),
+			"retention_days": u.retention.Snapshot(),
 			"version":        version,
 			"uptime_seconds": int(time.Since(u.started).Seconds()),
 			"ws_clients":     u.hub.ClientCount(),

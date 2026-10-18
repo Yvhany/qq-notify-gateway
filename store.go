@@ -58,6 +58,7 @@ type RecordStore struct {
 	records  []Record // 旧→新
 	nextID   uint64
 	onChange func(Record) // 新记录回调（用于 WS 广播），回调在锁外触发
+	onPurge  func(int)    // 清理回调（删除条数），回调在锁外触发
 }
 
 // NewRecordStore 载入历史记录并准备图片目录。
@@ -111,6 +112,91 @@ func NewRecordStore(dir string) (*RecordStore, error) {
 
 // SetOnChange 注册新记录回调（WS 广播用）。
 func (s *RecordStore) SetOnChange(f func(Record)) { s.onChange = f }
+
+// SetOnPurge 注册清理回调（删除条数，WS 广播用）。
+func (s *RecordStore) SetOnPurge(f func(int)) { s.onPurge = f }
+
+// PurgeBefore 删除 ts 早于 cutoff 的记录及其图片，返回删除条数。
+// 记录文件原子重写；图片按“是否仍被保留记录引用”清扫（含历史孤立文件）。
+func (s *RecordStore) PurgeBefore(cutoff time.Time) (int, error) {
+	s.mu.Lock()
+	kept := make([]Record, 0, len(s.records))
+	keptIDs := make(map[uint64]struct{}, len(s.records))
+	removed := 0
+	for _, r := range s.records {
+		ts, err := time.Parse(time.RFC3339, r.TS)
+		if err == nil && ts.Before(cutoff) {
+			removed++
+			continue
+		}
+		kept = append(kept, r)
+		keptIDs[r.ID] = struct{}{}
+	}
+	if removed == 0 {
+		s.mu.Unlock()
+		return 0, nil
+	}
+	s.records = kept
+	// 持锁重写，避免与 Add 的追加写交叉导致丢行
+	err := s.rewriteLocked()
+	s.mu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+
+	// 清扫图片：不再被保留记录引用的文件一律删除
+	files, _ := filepath.Glob(filepath.Join(s.dir, "images", "*"))
+	for _, p := range files {
+		base := filepath.Base(p)
+		if i := strings.IndexByte(base, '.'); i > 0 {
+			base = base[:i]
+		}
+		id, perr := strconv.ParseUint(base, 10, 64)
+		if perr != nil {
+			continue
+		}
+		if _, ok := keptIDs[id]; !ok {
+			_ = os.Remove(p)
+		}
+	}
+
+	if s.onPurge != nil {
+		s.onPurge(removed)
+	}
+	return removed, nil
+}
+
+// rewriteLocked 原子重写 records.jsonl（调用方必须持有 s.mu）。
+func (s *RecordStore) rewriteLocked() error {
+	path := filepath.Join(s.dir, "records.jsonl")
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("重写记录文件失败: %w", err)
+	}
+	w := bufio.NewWriter(f)
+	for _, r := range s.records {
+		line, merr := json.Marshal(r)
+		if merr != nil {
+			continue
+		}
+		if _, werr := w.Write(append(line, '\n')); werr != nil {
+			_ = f.Close()
+			_ = os.Remove(tmp)
+			return fmt.Errorf("写入记录文件失败: %w", werr)
+		}
+	}
+	if err := w.Flush(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("刷新记录文件失败: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, path)
+}
 
 // Add 写入一条记录并持久化；带图时先存图片文件。
 func (s *RecordStore) Add(source, status, errMsg, content string, image []byte, imageExt string) Record {

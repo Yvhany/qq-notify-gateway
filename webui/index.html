@@ -44,6 +44,8 @@ a{color:var(--primary);text-decoration:none}
 .btn.primary{background:var(--primary);border-color:var(--primary);color:#fff}
 .btn.primary:hover{background:#4096ff;border-color:#4096ff}
 .btn.dashed{border-style:dashed}
+.btn.danger{border-color:#ffa39e;color:var(--err)}
+.btn.danger:hover{background:var(--err);border-color:var(--err);color:#fff}
 .btn.sm{padding:4px 12px;font-size:12px}
 .stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:16px}
 .stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px 18px 16px;position:relative;overflow:hidden}
@@ -150,8 +152,20 @@ pre.code{font-family:ui-monospace,monospace;font-size:12px;background:#fafafa;bo
       <!-- 消息推送记录 -->
       <section class="view" id="v-records">
         <div class="page-head">
-          <div><h1>消息推送记录</h1><p>编号 · 消息内容 · 来源 · 状态 — 高密度分页</p></div>
-          <div style="display:flex;gap:10px"><button class="btn" onclick="loadRecords(recPage,true)">刷新</button></div>
+          <div><h1>消息推送记录</h1><p>编号 · 消息内容 · 来源 · 状态 — <span id="retHint">保留策略加载中…</span></p></div>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <span style="font-size:13px;color:var(--text-3)">保留</span>
+            <select class="input" id="retSel" style="width:110px" onchange="applyRetention()">
+              <option value="30">1 个月</option>
+              <option value="90">3 个月</option>
+              <option value="180">半年</option>
+              <option value="365">1 年</option>
+              <option value="0">永久</option>
+            </select>
+            <button class="btn" onclick="purgeOlder(30)">清除 30 天前</button>
+            <button class="btn danger" onclick="purgeAll()">清空全部</button>
+            <button class="btn" onclick="loadRecords(recPage,true)">刷新</button>
+          </div>
         </div>
         <div class="card">
           <div class="card-b" style="padding:12px">
@@ -264,7 +278,7 @@ menus.forEach(function(m){m.addEventListener('click',function(){
   var v=m.getAttribute('data-v');
   views.forEach(function(s){s.classList.toggle('on',s.id==='v-'+v)});
   document.getElementById('crumb').textContent=titles[v];
-  if(v==='records')loadRecords(1);
+  if(v==='records'){loadRecords(1);loadRetention();}
   if(v==='logs')loadLogs();
   if(v==='settings'){loadConfig();loadOpenID();}
   if(v==='webhook')loadWebhook();
@@ -461,7 +475,58 @@ async function saveTarget(){
     loadConfig();
   }catch(e){toast('网络错误，保存失败')}
 }
-async function jpost(u){var r=await fetch(u,{method:'POST'});return r.json()}
+async function jpost(u,body){
+  var opt={method:'POST'};
+  if(body!==undefined){opt={method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}}
+  var r=await fetch(u,opt);return r.json();
+}
+
+/* ===== 记录保留策略与清理 ===== */
+function fmtRet(days){
+  if(!days)return '永久保留';
+  if(days%365===0)return (days/365)+' 年';
+  if(days%30===0)return (days/30)+' 个月';
+  return days+' 天';
+}
+function renRet(days){
+  var sel=document.getElementById('retSel');
+  if(sel){var has=[].some.call(sel.options,function(o){return +o.value===days});if(has)sel.value=String(days)}
+  var h=document.getElementById('retHint');
+  if(h)h.textContent=days>0?('保留策略：保留 '+fmtRet(days)+'，到期自动清理记录与图片'):'保留策略：永久保留';
+}
+async function loadRetention(){
+  try{var d=await jget('/api/config');renRet(d.config.retention_days||0)}catch(e){}
+}
+async function applyRetention(){
+  var days=+document.getElementById('retSel').value;
+  var msg=days>0?('将保留 '+fmtRet(days)+'，更早的记录与图片会立即删除。确定应用？'):'将改为永久保留（不自动清理）。确定？';
+  if(!confirm(msg))return;
+  try{
+    var r=await jpost('/api/retention',{days:days});
+    if(!r.ok){toast(r.error||'保存失败');return}
+    toast('已应用：'+fmtRet(days)+(r.removed?('，立即清理 '+r.removed+' 条'):''));
+    renRet(days);loadRecords(1);loadStats();
+  }catch(e){toast('网络错误，保存失败')}
+}
+async function purgeOlder(days){
+  if(!confirm('删除 '+days+' 天前的全部记录与图片？此操作不可恢复。'))return;
+  try{
+    var r=await jpost('/api/records/purge',{older_than_days:days});
+    if(!r.ok){toast(r.error||'清理失败');return}
+    toast('已清理 '+r.removed+' 条');
+    loadRecords(1);loadStats();
+  }catch(e){toast('网络错误，清理失败')}
+}
+async function purgeAll(){
+  if(!confirm('清空全部记录与图片？此操作不可恢复！'))return;
+  if(!confirm('再次确认：真的要清空所有推送记录和图片吗？'))return;
+  try{
+    var r=await jpost('/api/records/purge',{older_than_days:0});
+    if(!r.ok){toast(r.error||'清空失败');return}
+    toast('已清空 '+r.removed+' 条');
+    loadRecords(1);loadStats();
+  }catch(e){toast('网络错误，清空失败')}
+}
 
 /* ===== 入站 token 重置 ===== */
 async function resetToken(){
@@ -530,6 +595,8 @@ function wsConnect(){
       else if(ev.type==='log'){appendLog(ev.data)}
       else if(ev.type==='webhook'){loadWebhook()}
       else if(ev.type==='openid'||ev.type==='openid_state'||ev.type==='target'){onOpenIDEvent(ev)}
+      else if(ev.type==='records_purged'){if(document.getElementById('v-records').classList.contains('on'))loadRecords(recPage)}
+      else if(ev.type==='retention'){renRet(ev.data.days)}
     }catch(err){}
   };
   ws.onclose=function(){ws=null;setWsDot(false,'实时断开');
@@ -542,7 +609,7 @@ window.addEventListener('pagehide',wsDisconnect);
 window.addEventListener('resize',function(){if(lastStats)drawTrend(lastStats.daily_counts||[])});
 
 /* ===== 初始化 ===== */
-loadStats();loadRecords(1);loadWebhook();loadLogs();loadConfig();loadOpenID();
+loadStats();loadRecords(1);loadWebhook();loadLogs();loadConfig();loadOpenID();loadRetention();
 wsConnect();
 </script>
 </body>

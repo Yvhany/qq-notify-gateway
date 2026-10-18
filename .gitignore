@@ -22,3 +22,4 @@ node_modules/
 .DS_Store
 
 diff_idx.txt
+diff_ui.txt
