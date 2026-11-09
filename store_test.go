@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
@@ -112,12 +113,23 @@ func TestNotifyWritesRecordAndImage(t *testing.T) {
 	defer mock.Close()
 
 	cfg := Config{AppID: "a", Secret: "s", TargetType: "c2c", TargetOpenID: "OPENID_TEST", APIBase: mock.URL}
-	qq := NewQQClient(cfg, staticTokenSource{}, 5*time.Second, newTargetState(cfg.TargetType, cfg.TargetOpenID))
-	store, _ := NewRecordStore(t.TempDir())
+	dir := t.TempDir()
+	store, _ := NewRecordStore(dir)
+	channels, err := LoadChannels(dir, cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clients := newChannelHub(context.Background(), 5*time.Second)
+	clients.build = func(_ context.Context, ch Channel) (*QQClient, context.CancelFunc, error) {
+		c := ch.qqConfig()
+		return NewQQClient(c, staticTokenSource{}, 5*time.Second,
+			newTargetState(c.TargetType, c.TargetOpenID)), func() {}, nil
+	}
+	defer clients.Close()
 	hub := NewHub()
 	listener := newOpenIDListener(hub)
-	ui := newWebUI(cfg, store, hub, t.TempDir(), qq.target, qq, listener, newTokenState(""), newRetentionState(0))
-	handler := newMux(ui.token, qq, ui)
+	ui := newWebUI(cfg, store, hub, dir, channels, clients, listener, newRetentionState(0))
+	handler := newMux(newNotifier(channels, clients, store), ui)
 
 	img := pngMagic(64)
 	body := `{"title":"标题","content":"内容正文","source":"三月七小助手","image":"` + base64PNG(img) + `"}`

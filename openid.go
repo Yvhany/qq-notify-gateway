@@ -29,6 +29,7 @@ type openidCapture struct {
 
 // openIDListener 运行时 60 秒采集窗口：手写 WS 客户端，生命周期完全受控
 // （botgo session manager 无停止 API，窗口外无法保证零接收，故不复用）。
+// 同一时刻只允许一个采集窗口，channel 记录本次窗口使用的通道。
 type openIDListener struct {
 	mu        sync.Mutex
 	running   bool
@@ -36,6 +37,7 @@ type openIDListener struct {
 	cancel    context.CancelFunc
 	c2c       string
 	group     string
+	channel   string
 	hub       *Hub
 }
 
@@ -59,6 +61,7 @@ func (l *openIDListener) Snapshot() map[string]any {
 		"remaining_seconds": remaining,
 		"c2c":               l.c2c,
 		"group":             l.group,
+		"channel":           l.channel,
 	}
 }
 
@@ -79,8 +82,8 @@ func (l *openIDListener) record(kind, id string) {
 	l.hub.Broadcast("openid", ev)
 }
 
-// Start 启动一个采集窗口；已在运行时返回错误。
-func (l *openIDListener) Start(qq *QQClient) error {
+// Start 启动一个采集窗口（使用指定通道的机器人凭证）；已在运行时返回错误。
+func (l *openIDListener) Start(qq *QQClient, channelID string) error {
 	l.mu.Lock()
 	if l.running {
 		l.mu.Unlock()
@@ -90,6 +93,7 @@ func (l *openIDListener) Start(qq *QQClient) error {
 	l.cancel = cancel
 	l.running = true
 	l.startedAt = time.Now()
+	l.channel = channelID
 	l.mu.Unlock()
 
 	l.hub.Broadcast("openid_state", l.Snapshot())
@@ -256,9 +260,28 @@ func (u *webUI) handleOpenIDGet(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "state": u.listener.Snapshot()})
 }
 
-// handleOpenIDListen POST /api/openid/listen — 启动 60s 窗口
-func (u *webUI) handleOpenIDListen(w http.ResponseWriter, _ *http.Request) {
-	if err := u.listener.Start(u.qq); err != nil {
+// resolveChannel 取 ?channel= 指定的通道；缺省用默认通道。
+func (u *webUI) resolveChannel(r *http.Request) (Channel, bool) {
+	id := strings.TrimSpace(r.URL.Query().Get("channel"))
+	if id == "" {
+		id = u.channels.Default()
+	}
+	return u.channels.Get(id)
+}
+
+// handleOpenIDListen POST /api/openid/listen?channel=<id> — 启动 60s 窗口
+func (u *webUI) handleOpenIDListen(w http.ResponseWriter, r *http.Request) {
+	ch, ok := u.resolveChannel(r)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "通道不存在"})
+		return
+	}
+	qq, err := u.clients.Client(ch)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if err := u.listener.Start(qq, ch.ID); err != nil {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
@@ -271,7 +294,7 @@ func (u *webUI) handleOpenIDStop(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleTargetPut PUT /api/target — 切换单聊/群组并持久化
+// handleTargetPut PUT /api/target?channel=<id> — 切换该通道的单聊/群组目标并持久化
 func (u *webUI) handleTargetPut(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	var req struct {
@@ -282,7 +305,7 @@ func (u *webUI) handleTargetPut(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "请求体无效"})
 		return
 	}
-	// 先做与 target.Update 相同的校验（不动内存）
+	// 先校验（不动内存）
 	typ := strings.ToLower(strings.TrimSpace(req.TargetType))
 	id := strings.TrimSpace(req.TargetOpenID)
 	if typ != "c2c" && typ != "group" {
@@ -293,21 +316,22 @@ func (u *webUI) handleTargetPut(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "OpenID 格式无效"})
 		return
 	}
-	// 落盘成功后才更新内存，保证两者一致
-	u.stateMu.Lock()
-	st := u.loadState()
-	st.TargetType, st.TargetOpenID = typ, id
-	saveErr := u.saveState(st)
-	u.stateMu.Unlock()
-	if saveErr != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": saveErr.Error()})
+	ch, ok := u.resolveChannel(r)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "通道不存在"})
 		return
 	}
-	if err := u.target.Update(typ, id); err != nil {
-		// 校验已通过，理论上不可达；防御性回滚
+	// 落盘成功后才生效
+	updated, err := u.channels.SetTarget(ch.ID, typ, id)
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	u.hub.Broadcast("target", map[string]any{"target_type": typ, "target_openid": id})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "target_type": typ, "target_openid": id})
+	u.clients.Drop(updated.ID)
+	u.hub.Broadcast("target", map[string]any{
+		"channel": updated.ID, "target_type": typ, "target_openid": id,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "channel": updated.ID, "target_type": typ, "target_openid": id,
+	})
 }

@@ -1,7 +1,7 @@
 services:
   gateway:
     build: .
-    container_name: qq-notify-gateway
+    container_name: Notify_Gateway
     env_file: .env
     environment:
       DATA_DIR: /data

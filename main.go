@@ -7,17 +7,20 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/tencent-connect/botgo/constant"
-	"github.com/tencent-connect/botgo/token"
 )
 
 func main() {
 	// 官方文档现行 token 端点为 api.bot.qq.com；老的 bots.qq.com 对新应用返回 100002
 	constant.TokenDomain = "https://api.bot.qq.com"
+
+	// 关闭 botgo SDK 的 Debug 日志：它会把 AppSecret 与 AccessToken 明文写进日志文件/WebUI
+	installQuietBotgoLogger()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -48,46 +51,54 @@ func main() {
 		hub.Broadcast("stats", store.Stats())
 	})
 
-	// 持久化状态只读一次：目标覆盖 + 入站 token 解析共用
+	// 单通道时代的 token 种子：只在**首次**生成 channels.json 时用作 default 通道的
+	// token，之后以 channels.json 为准。channels.json 已存在时完全不碰 webui.json，
+	// 避免每次启动都白写一次盘。
 	persisted := loadStateFrom(dataDir)
+	channelsPath := filepath.Join(dataDir, "channels.json")
+	needMigration := false
+	if _, statErr := os.Stat(channelsPath); os.IsNotExist(statErr) {
+		needMigration = true
+	}
+	seedToken := strings.TrimSpace(persisted.GatewayToken)
+	if needMigration {
+		if seedToken == "" {
+			seedToken = strings.TrimSpace(cfg.GatewayToken)
+		}
+		if seedToken == "" {
+			v, err := randomToken()
+			if err != nil {
+				log.Fatalf("生成入站 token 失败: %v", err)
+			}
+			seedToken = v
+		}
+		if persisted.GatewayToken != seedToken {
+			persisted.GatewayToken = seedToken
+			if err := saveStateTo(dataDir, persisted); err != nil {
+				log.Printf("警告: token 种子持久化失败: %v", err)
+			}
+		}
+	}
 
-	// 推送目标：.env 为初始值，数据卷 webui.json 的持久化目标优先（重启保持）
-	target := newTargetState(cfg.TargetType, cfg.TargetOpenID)
-	if persisted.TargetOpenID != "" {
-		typ := persisted.TargetType
-		if typ == "" {
-			typ = cfg.TargetType
-		}
-		if err := target.Update(typ, persisted.TargetOpenID); err != nil {
-			log.Printf("警告: 持久化目标覆盖失败（沿用 .env 初值）: %v", err)
-		} else {
-			log.Printf("已加载持久化推送目标: type=%s id=%s", typ, persisted.TargetOpenID)
-		}
+	// 通道配置：唯一真源，落盘 DATA_DIR/channels.json
+	channels, err := LoadChannels(dataDir, cfg, seedToken)
+	if err != nil {
+		log.Fatalf("加载通道配置失败: %v", err)
 	}
-	if typ, id := target.Snapshot(); typ != cfg.TargetType || id != cfg.TargetOpenID {
-		log.Printf("生效推送目标: type=%s id=%s（初始 .env: type=%s id=%s）", typ, id, cfg.TargetType, cfg.TargetOpenID)
-	}
+	log.Printf("已加载 %d 个通道，默认通道=%s", len(channels.List()), channels.Default())
 
-	// 入站校验 token：webui.json → 环境变量 → 自动生成并持久化（token 值不入日志）
-	tokVal := persisted.GatewayToken
-	if tokVal == "" {
-		tokVal = strings.TrimSpace(cfg.GatewayToken)
-	}
-	if tokVal == "" {
-		v, err := randomToken()
-		if err != nil {
-			log.Fatalf("生成入站 token 失败: %v", err)
-		}
-		tokVal = v
-	}
-	if persisted.GatewayToken != tokVal {
-		persisted.GatewayToken = tokVal
+	// 迁移完成后清掉 webui.json 里的 token 种子：它只在首次生成 channels.json 时有意义，
+	// 留着会变成一个「复活旧 token」的暗坑（channels.json 一旦丢失会拿它重建通道）。
+	if strings.TrimSpace(persisted.GatewayToken) != "" {
+		persisted.GatewayToken = ""
 		if err := saveStateTo(dataDir, persisted); err != nil {
-			log.Printf("警告: 入站 token 持久化失败（重启后将重新生成）: %v", err)
+			log.Printf("警告: 清理 webui.json 中已失效的 token 种子失败: %v", err)
 		}
 	}
-	tok := newTokenState(tokVal)
-	log.Printf("入站校验 token 已启用（值不记入日志，可在系统配置页查看/重置）")
+
+	// 每通道一个 QQ 客户端，懒创建
+	clients := newChannelHub(ctx, 60*time.Second)
+	defer clients.Close()
 
 	// 保留策略：数据卷持久化值；>0 时启动即清理一次，并每 6 小时定期清理
 	retention := newRetentionState(persisted.RetentionDays)
@@ -123,27 +134,17 @@ func main() {
 	}()
 
 	listener := newOpenIDListener(hub)
-
-	// botgo token source：atomic 缓存 + singleflight + 后台自动刷新
-	tokenSource := token.NewQQBotTokenSource(&token.QQBotCredentials{
-		AppID:     cfg.AppID,
-		AppSecret: cfg.Secret,
-	})
-	if err := token.StartRefreshAccessToken(ctx, tokenSource); err != nil {
-		log.Fatalf("初始化 AccessToken 失败: %v", err)
-	}
-
-	qq := NewQQClient(cfg, tokenSource, 60*time.Second, target)
-	ui := newWebUI(cfg, store, hub, dataDir, target, qq, listener, tok, retention)
-	core := newMux(tok, qq, ui)
+	notify := newNotifier(channels, clients, store)
+	ui := newWebUI(cfg, store, hub, dataDir, channels, clients, listener, retention)
+	core := newMux(notify, ui)
 
 	// 双端口拆分：
-	//   API 口（LISTEN_ADDR）   —— 仅 POST /notify，token 校验；反代可整口免登录放行
-	//   UI  口（UI_LISTEN_ADDR）—— 页面/统计/记录/日志/WS；由反代登录保护，网关不再加鉴权
+	//   API 口（LISTEN_ADDR）   —— 仅 /notify 与 /notify/<通道>，按通道校验；反代可整口免登录放行
+	//   UI  口（UI_LISTEN_ADDR）—— 页面/统计/记录/通道管理/日志/WS；由反代登录保护，网关不再加鉴权
 	apiSrv := &http.Server{
 		Addr: cfg.ListenAddr,
 		Handler: routeFilter(core, func(r *http.Request) bool {
-			return r.URL.Path == "/notify"
+			return isAPIPath(r.URL.Path)
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -152,7 +153,7 @@ func main() {
 		uiSrv = &http.Server{
 			Addr: cfg.UIListenAddr,
 			Handler: routeFilter(core, func(r *http.Request) bool {
-				return r.URL.Path != "/notify"
+				return !isAPIPath(r.URL.Path)
 			}),
 			ReadHeaderTimeout: 10 * time.Second,
 		}
@@ -168,14 +169,19 @@ func main() {
 		}
 	}()
 
-	typ, id := target.Snapshot()
-	log.Printf("API(推送)监听 %s —— 仅 POST /notify，token 校验", cfg.ListenAddr)
+	log.Printf("API(推送)监听 %s —— POST /notify（默认通道）与 POST /notify/<通道>，按通道校验", cfg.ListenAddr)
 	if uiSrv != nil {
-		log.Printf("UI 监听 %s —— 页面/记录/日志/WS（由反代登录保护）", cfg.UIListenAddr)
+		log.Printf("UI 监听 %s —— 页面/记录/通道管理/日志/WS（由反代登录保护）", cfg.UIListenAddr)
 	} else {
 		log.Printf("UI 监听已禁用（UI_LISTEN_ADDR 为空）")
 	}
-	log.Printf("目标=%s openid=%s api=%s", typ, id, cfg.APIBase)
+	for _, ch := range channels.List() {
+		state := "启用"
+		if !ch.Enabled {
+			state = "停用"
+		}
+		log.Printf("  通道 %-12s 类型=%-7s %s 目标=%s/%s", ch.ID, ch.Type, state, ch.QQ.TargetType, openidTail(ch.QQ.TargetOpenID))
+	}
 
 	errCh := make(chan error, 2)
 	go func() {

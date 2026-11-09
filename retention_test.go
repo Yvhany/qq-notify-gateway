@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -98,15 +99,23 @@ func TestRetentionAndPurgeAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := Config{AppID: "a", Secret: "s", TargetType: "c2c", TargetOpenID: "OID", APIBase: "http://example.invalid"}
-	target := newTargetState(cfg.TargetType, cfg.TargetOpenID)
-	qq := NewQQClient(cfg, staticTokenSource{}, time.Second, target)
+	cfg := Config{AppID: "a", Secret: "s", TargetType: "c2c", TargetOpenID: "OID_TEST", APIBase: "http://example.invalid"}
+	channels, err := LoadChannels(dir, cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clients := newChannelHub(context.Background(), time.Second)
+	clients.build = func(_ context.Context, ch Channel) (*QQClient, context.CancelFunc, error) {
+		c := ch.qqConfig()
+		return NewQQClient(c, staticTokenSource{}, time.Second,
+			newTargetState(c.TargetType, c.TargetOpenID)), func() {}, nil
+	}
+	defer clients.Close()
 	hub := NewHub()
 	listener := newOpenIDListener(hub)
 	ret := newRetentionState(0)
-	tok := newTokenState("")
-	ui := newWebUI(cfg, store, hub, dir, target, qq, listener, tok, ret)
-	handler := newMux(tok, qq, ui)
+	ui := newWebUI(cfg, store, hub, dir, channels, clients, listener, ret)
+	handler := newMux(newNotifier(channels, clients, store), ui)
 
 	post := func(path, body string) (int, map[string]any) {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -34,12 +35,24 @@ func TestTargetStateUpdateAndPersist(t *testing.T) {
 		t.Error("非法 openid 应报错")
 	}
 
-	// 经 API 切换并持久化
-	store, _ := NewRecordStore(t.TempDir())
+	// 经 API 切换并持久化（目标现在存放在通道配置 channels.json 里）
+	channels, err := LoadChannels(dir, cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clients := newChannelHub(context.Background(), time.Second)
+	clients.build = func(_ context.Context, ch Channel) (*QQClient, context.CancelFunc, error) {
+		c := ch.qqConfig()
+		return NewQQClient(c, staticTokenSource{}, time.Second,
+			newTargetState(c.TargetType, c.TargetOpenID)), func() {}, nil
+	}
+	defer clients.Close()
+
+	store, _ := NewRecordStore(dir)
 	hub := NewHub()
 	listener := newOpenIDListener(hub)
-	ui := newWebUI(cfg, store, hub, dir, target, qq, listener, newTokenState(""), newRetentionState(0))
-	handler := newMux(ui.token, qq, ui)
+	ui := newWebUI(cfg, store, hub, dir, channels, clients, listener, newRetentionState(0))
+	handler := newMux(newNotifier(channels, clients, store), ui)
 
 	body := `{"target_type":"group","target_openid":"PERSIST_GROUP_1"}`
 	req := httptest.NewRequest(http.MethodPut, "/api/target", strings.NewReader(body))
@@ -49,19 +62,14 @@ func TestTargetStateUpdateAndPersist(t *testing.T) {
 		t.Fatalf("PUT /api/target = %d: %s", rec.Code, rec.Body.String())
 	}
 
-	st := loadStateFrom(dir)
-	if st.TargetType != "group" || st.TargetOpenID != "PERSIST_GROUP_1" {
-		t.Errorf("持久化目标错误: %+v", st)
+	// 模拟重启：从 channels.json 重新加载，目标应已持久化
+	reloaded, err := LoadChannels(dir, cfg, "")
+	if err != nil {
+		t.Fatal(err)
 	}
-	// 模拟重启：新 target 从持久化状态恢复
-	target2 := newTargetState("c2c", "OLD")
-	if st2 := loadStateFrom(dir); st2.TargetOpenID != "" {
-		if err := target2.Update(st2.TargetType, st2.TargetOpenID); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if typ, id := target2.Snapshot(); typ != "group" || id != "PERSIST_GROUP_1" {
-		t.Errorf("重启恢复错误: %s/%s", typ, id)
+	def, ok := reloaded.Get(reloaded.Default())
+	if !ok || def.QQ.TargetType != "group" || def.QQ.TargetOpenID != "PERSIST_GROUP_1" {
+		t.Errorf("持久化目标错误: %+v", def.QQ)
 	}
 }
 
@@ -131,10 +139,10 @@ func TestOpenIDListenerWindow(t *testing.T) {
 	hub := NewHub()
 	listener := newOpenIDListener(hub)
 
-	if err := listener.Start(qq); err != nil {
+	if err := listener.Start(qq, "test-channel"); err != nil {
 		t.Fatal(err)
 	}
-	if err := listener.Start(qq); err == nil {
+	if err := listener.Start(qq, "test-channel"); err == nil {
 		t.Error("重复 Start 应报冲突")
 	}
 

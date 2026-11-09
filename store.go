@@ -21,14 +21,43 @@ const (
 
 // Record 一条推送记录（持久化于 records.jsonl，不含图片字节）。
 type Record struct {
-	ID      uint64 `json:"id"`
-	TS      string `json:"ts"` // RFC3339 本地时区
-	Source  string `json:"source"`
-	Status  string `json:"status"` // ok | error
-	Error   string `json:"error,omitempty"`
-	Content string `json:"content"`
-	Snippet string `json:"snippet"`
-	HasImage bool  `json:"has_image"`
+	ID       uint64 `json:"id"`
+	TS       string `json:"ts"`                // RFC3339 本地时区
+	Channel  string `json:"channel,omitempty"` // 所属通道 ID；旧记录缺失视为 default
+	Source   string `json:"source"`
+	Status   string `json:"status"` // ok | error
+	Error    string `json:"error,omitempty"`
+	Content  string `json:"content"`
+	Snippet  string `json:"snippet"`
+	HasImage bool   `json:"has_image"`
+	Detail   *RequestDetail `json:"detail,omitempty"` // 入站请求快照；旧记录无此字段
+}
+
+// RequestDetail 入站请求的原始快照，供详情页排查用。
+// 敏感请求头已打码，请求体超 detailBodyLimit 时截断并置 BodyTruncated。
+type RequestDetail struct {
+	Method        string            `json:"method,omitempty"`
+	Path          string            `json:"path,omitempty"`
+	RemoteIP      string            `json:"remote_ip,omitempty"`
+	ContentType   string            `json:"content_type,omitempty"`
+	Headers       map[string]string `json:"headers,omitempty"`
+	Body          string            `json:"body,omitempty"`
+	BodyBytes     int               `json:"body_bytes,omitempty"`
+	BodyTruncated bool              `json:"body_truncated,omitempty"`
+}
+
+// channelOf 记录所属通道；历史记录没有该字段时归入 default。
+func channelOf(r Record) string {
+	if strings.TrimSpace(r.Channel) == "" {
+		return defaultChannelID
+	}
+	return r.Channel
+}
+
+// matchChannel 空 filter 表示不过滤。
+func matchChannel(r Record, filter string) bool {
+	filter = strings.TrimSpace(filter)
+	return filter == "" || channelOf(r) == filter
 }
 
 // makeSnippet 按 rune 截取前 10 字，超出追加三个点。
@@ -42,13 +71,13 @@ func makeSnippet(content string) string {
 
 // Stats 数据看板统计。
 type Stats struct {
-	TodayCount      int      `json:"today_count"`
-	TodaySuccess    int      `json:"today_success"`
-	TodayRate       float64  `json:"today_rate"` // 0-100，今日无记录为 0
-	TotalCount      int      `json:"total_count"`
-	LastStatus      string   `json:"last_status"`
-	DailyCounts     []int    `json:"daily_counts"` // 近 7 日 [旧→新]
-	DailySuccess    []int    `json:"daily_success"`
+	TodayCount   int     `json:"today_count"`
+	TodaySuccess int     `json:"today_success"`
+	TodayRate    float64 `json:"today_rate"` // 0-100，今日无记录为 0
+	TotalCount   int     `json:"total_count"`
+	LastStatus   string  `json:"last_status"`
+	DailyCounts  []int   `json:"daily_counts"` // 近 7 日 [旧→新]
+	DailySuccess []int   `json:"daily_success"`
 }
 
 // RecordStore 推送记录存储：内存 + JSONL 追加 + 图片文件。
@@ -198,18 +227,30 @@ func (s *RecordStore) rewriteLocked() error {
 	return os.Rename(tmp, path)
 }
 
-// Add 写入一条记录并持久化；带图时先存图片文件。
+// Add 写入一条记录并持久化（不指定通道，归入 default）。
 func (s *RecordStore) Add(source, status, errMsg, content string, image []byte, imageExt string) Record {
+	return s.AddChannel(defaultChannelID, source, status, errMsg, content, image, imageExt)
+}
+
+// AddChannel 写入一条带通道归属的记录并持久化；带图时先存图片文件。
+func (s *RecordStore) AddChannel(channel, source, status, errMsg, content string, image []byte, imageExt string) Record {
+	return s.AddChannelDetail(channel, source, status, errMsg, content, image, imageExt, nil)
+}
+
+// AddChannelDetail 同 AddChannel，额外落一条入站请求快照（detail 可为 nil）。
+func (s *RecordStore) AddChannelDetail(channel, source, status, errMsg, content string, image []byte, imageExt string, detail *RequestDetail) Record {
 	s.mu.Lock()
 	rec := Record{
 		ID:       s.nextID,
 		TS:       time.Now().Format(time.RFC3339),
+		Channel:  channel,
 		Source:   source,
 		Status:   status,
 		Error:    errMsg,
 		Content:  content,
 		Snippet:  makeSnippet(content),
 		HasImage: len(image) > 0,
+		Detail:   detail,
 	}
 	s.nextID++
 	s.records = append(s.records, rec)
@@ -279,18 +320,26 @@ func sortByImageID(paths []string) {
 	sort.Slice(paths, func(i, j int) bool { return idOf(paths[i]) < idOf(paths[j]) })
 }
 
-// List 返回记录（新→旧），支持 offset/limit。
+// List 返回记录（新→旧），支持 offset/limit（不按通道过滤）。
 func (s *RecordStore) List(offset, limit int) (total int, out []Record) {
+	return s.ListByChannel("", offset, limit)
+}
+
+// ListByChannel 按通道过滤返回记录（新→旧）；channel 为空表示全部通道。
+func (s *RecordStore) ListByChannel(channel string, offset, limit int) (total int, out []Record) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	total = len(s.records)
-	if offset < 0 {
-		offset = 0
-	}
 	// 新→旧遍历
 	rev := make([]Record, 0, len(s.records))
 	for i := len(s.records) - 1; i >= 0; i-- {
+		if !matchChannel(s.records[i], channel) {
+			continue
+		}
 		rev = append(rev, s.records[i])
+	}
+	total = len(rev)
+	if offset < 0 {
+		offset = 0
 	}
 	if offset >= len(rev) {
 		return total, nil
@@ -300,6 +349,19 @@ func (s *RecordStore) List(offset, limit int) (total int, out []Record) {
 		end = len(rev)
 	}
 	return total, rev[offset:end]
+}
+
+// GetByID 按记录 id 取单条（供记录详情页，带完整正文）。
+// records 按追加顺序保存、id 单调递增，故从尾部往前找更快命中新记录。
+func (s *RecordStore) GetByID(id uint64) (Record, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := len(s.records) - 1; i >= 0; i-- {
+		if s.records[i].ID == id {
+			return s.records[i], true
+		}
+	}
+	return Record{}, false
 }
 
 // Recent 返回最新的 n 条（旧→新，供事件流/初值）。
@@ -314,15 +376,19 @@ func (s *RecordStore) Recent(n int) []Record {
 	return out
 }
 
-// Stats 计算看板统计（按本机时区的“今日”与近 7 日）。
+// Stats 计算看板统计（全部通道）。
 func (s *RecordStore) Stats() Stats {
+	return s.StatsByChannel("")
+}
+
+// StatsByChannel 计算看板统计（按本机时区的“今日”与近 7 日）；channel 为空表示全部。
+func (s *RecordStore) StatsByChannel(channel string) Stats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := time.Now()
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	var st Stats
-	st.TotalCount = len(s.records)
 	days := make([]time.Time, 7)
 	for i := 0; i < 7; i++ {
 		days[i] = today.AddDate(0, 0, i-6)
@@ -331,6 +397,10 @@ func (s *RecordStore) Stats() Stats {
 	st.DailySuccess = make([]int, 7)
 
 	for _, r := range s.records {
+		if !matchChannel(r, channel) {
+			continue
+		}
+		st.TotalCount++
 		ts, err := time.Parse(time.RFC3339, r.TS)
 		if err != nil {
 			continue
@@ -354,8 +424,12 @@ func (s *RecordStore) Stats() Stats {
 	if st.TodayCount > 0 {
 		st.TodayRate = float64(st.TodaySuccess) / float64(st.TodayCount) * 100
 	}
-	if n := len(s.records); n > 0 {
-		st.LastStatus = s.records[n-1].Status
+	// 最近状态取过滤范围内的最后一条
+	for i := len(s.records) - 1; i >= 0; i-- {
+		if matchChannel(s.records[i], channel) {
+			st.LastStatus = s.records[i].Status
+			break
+		}
 	}
 	return st
 }

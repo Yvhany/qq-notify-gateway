@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,7 +21,9 @@ var webuiFS embed.FS
 
 var version = "dev"
 
-// stateFile 持久化的 UI/目标/Token/保留策略状态（DATA_DIR/webui.json）。
+// stateFile 持久化的 UI 级状态（DATA_DIR/webui.json）。
+// target_type / target_openid / gateway_token 为单通道时代遗留字段：
+// 仅在首次迁移生成 channels.json 时读取，之后以 channels.json 为准。
 type stateFile struct {
 	WebhookURL    string `json:"webhook_url"`
 	TargetType    string `json:"target_type,omitempty"`
@@ -31,21 +34,21 @@ type stateFile struct {
 
 // webUI 聚合 Web 界面所需依赖与状态。
 type webUI struct {
-	cfg      Config
-	store    *RecordStore
-	hub      *Hub
-	dataDir  string
-	started  time.Time
-	statePat string
-	stateMu  sync.Mutex // webui.json 的 load→save 互斥（webhook/target 两类写方）
-	target    *targetState
-	qq        *QQClient
+	cfg       Config
+	store     *RecordStore
+	hub       *Hub
+	dataDir   string
+	started   time.Time
+	statePat  string
+	stateMu   sync.Mutex // webui.json 的 load→save 互斥
+	channels  *channelStore
+	clients   *channelHub
 	listener  *openIDListener
-	token     *tokenState
 	retention *retentionState
+	hook      *hookInbox
 }
 
-func newWebUI(cfg Config, store *RecordStore, hub *Hub, dataDir string, target *targetState, qq *QQClient, listener *openIDListener, tok *tokenState, retention *retentionState) *webUI {
+func newWebUI(cfg Config, store *RecordStore, hub *Hub, dataDir string, channels *channelStore, clients *channelHub, listener *openIDListener, retention *retentionState) *webUI {
 	return &webUI{
 		cfg:       cfg,
 		store:     store,
@@ -53,27 +56,29 @@ func newWebUI(cfg Config, store *RecordStore, hub *Hub, dataDir string, target *
 		dataDir:   dataDir,
 		started:   time.Now(),
 		statePat:  filepath.Join(dataDir, "webui.json"),
-		target:    target,
-		qq:        qq,
+		channels:  channels,
+		clients:   clients,
 		listener:  listener,
-		token:     tok,
 		retention: retention,
+		hook:      newHookInbox(hub),
 	}
 }
 
-// handleStats 看板统计。
-func (u *webUI) handleStats(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "stats": u.store.Stats()})
+// handleStats 看板统计（?channel= 过滤单通道）。
+func (u *webUI) handleStats(w http.ResponseWriter, r *http.Request) {
+	ch := strings.TrimSpace(r.URL.Query().Get("channel"))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "stats": u.store.StatsByChannel(ch)})
 }
 
-// handleRecords 分页列出记录（新→旧）。
+// handleRecords 分页列出记录（新→旧，?channel= 过滤单通道）。
 func (u *webUI) handleRecords(w http.ResponseWriter, r *http.Request) {
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	total, items := u.store.List(offset, limit)
+	ch := strings.TrimSpace(r.URL.Query().Get("channel"))
+	total, items := u.store.ListByChannel(ch, offset, limit)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "total": total, "items": items})
 }
 
@@ -91,6 +96,38 @@ func (u *webUI) handleRecordImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.ServeFile(w, r, path)
+}
+
+// handleRecordGet 输出单条记录（记录详情页用，带完整正文，非摘要）。
+func (u *webUI) handleRecordGet(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "无效的记录 ID"})
+		return
+	}
+	rec, ok := u.store.GetByID(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "记录不存在"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "record": rec})
+}
+
+// handleTestInboxList 返回「Webhook 测试」收件箱最近请求（新→旧）。
+func (u *webUI) handleTestInboxList(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > hookInboxCap {
+		limit = hookInboxCap
+	}
+	total, items := u.hook.List(limit)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "total": total, "items": items})
+}
+
+// handleTestInboxClear 清空收件箱（内存缓冲，不影响推送记录）。
+func (u *webUI) handleTestInboxClear(w http.ResponseWriter, r *http.Request) {
+	n := u.hook.Clear()
+	u.hub.Broadcast("hook_cleared", map[string]any{"removed": n})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": n})
 }
 
 // handleRetentionPost 应用保留策略：days>0 时立即清理更早的数据。
@@ -159,26 +196,33 @@ func (u *webUI) handleRecordsPurge(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed})
 }
 
-// handleConfig 只读全量配置（按用户指示不打码，访问控制由反代承担）。
+// handleConfig 只读全量配置。密钥类字段一律打码（多通道后同进程内持有多个机器人
+// AppSecret，明文展示风险过高），需要真实值请走 POST /api/channels/{id}/secret。
 func (u *webUI) handleConfig(w http.ResponseWriter, _ *http.Request) {
 	st := u.loadState()
-	typ, id := u.target.Snapshot()
+	defID := u.channels.Default()
+	def, _ := u.channels.Get(defID)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true,
 		"config": map[string]any{
-			"target_type":    typ,
-			"target_openid":  id,
-			"api_base":       u.cfg.APIBase,
-			"listen_addr":    u.cfg.ListenAddr,
-			"app_id":         u.cfg.AppID,
-			"app_secret":     u.cfg.Secret,
-			"data_dir":       u.dataDir,
-			"webhook_url":    st.WebhookURL,
-			"gateway_token":  u.token.Snapshot(),
-			"retention_days": u.retention.Snapshot(),
-			"version":        version,
-			"uptime_seconds": int(time.Since(u.started).Seconds()),
-			"ws_clients":     u.hub.ClientCount(),
+			"default_channel":  defID,
+			"channel_count":    len(u.channels.List()),
+			"target_type":      def.QQ.TargetType,
+			"target_openid":    def.QQ.TargetOpenID,
+			"api_base":         def.qqConfig().APIBase,
+			"listen_addr":      u.cfg.ListenAddr,
+			"ui_listen_addr":   u.cfg.UIListenAddr,
+			"app_id":           def.QQ.AppID,
+			"app_secret":       maskSecret(def.QQ.AppSecret),
+			"data_dir":         u.dataDir,
+			"webhook_url":      st.WebhookURL,
+			"gateway_token":    maskSecret(def.Token),
+			"retention_days":   u.retention.Snapshot(),
+			"version":          version,
+			"uptime_seconds":   int(time.Since(u.started).Seconds()),
+			"ws_clients":       u.hub.ClientCount(),
+			"channels_file":    u.channels.path,
+			"client_pool_size": u.clients.Size(),
 		},
 	})
 }
@@ -253,25 +297,20 @@ func saveStateTo(dataDir string, st stateFile) error {
 	return os.WriteFile(filepath.Join(dataDir, "webui.json"), data, 0o644)
 }
 
-// handleTokenReset 重置入站校验 token：先持久化，成功后才替换内存。
+// handleTokenReset 重置默认通道的入站 token：先持久化，成功后才生效。
 func (u *webUI) handleTokenReset(w http.ResponseWriter, _ *http.Request) {
 	candidate, err := randomToken()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	u.stateMu.Lock()
-	st := u.loadState()
-	st.GatewayToken = candidate
-	saveErr := u.saveState(st)
-	u.stateMu.Unlock()
-	if saveErr != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": saveErr.Error()})
+	id := u.channels.Default()
+	if _, err := u.channels.SetToken(id, candidate); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	u.token.Set(candidate)
-	log.Printf("入站校验 token 已重置")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "token": candidate})
+	log.Printf("通道 %s 的入站 token 已重置", id)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "channel": id, "token": candidate})
 }
 
 // loadStateFrom 包级读取（main 启动时应用目标覆盖）。
@@ -285,16 +324,28 @@ func loadStateFrom(dataDir string) stateFile {
 	return st
 }
 
+// recordDetailRoute 匹配记录详情的前端路由 /<id>（如 /117）。
+// 只放行纯数字路径，其余非根路径维持 404，避免误吞入站/API 路由。
+var recordDetailRoute = regexp.MustCompile(`^/[0-9]{1,20}$`)
+
 // handleIndex 提供内嵌的单文件前端。
+// /<id> 是记录详情的前端路由：同一个单文件前端接管，由 JS 解析 pathname 展开对应记录。
 func (u *webUI) handleIndex(w http.ResponseWriter, r *http.Request) {
 	sub, err := fs.Sub(webuiFS, "webui")
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	if r.URL.Path != "/" && r.URL.Path != "/index.html" {
+	p := r.URL.Path
+	isDetail := recordDetailRoute.MatchString(p)
+	if p != "/" && p != "/index.html" && !isDetail {
 		http.NotFound(w, r)
 		return
+	}
+	if isDetail {
+		// 交回首页内容，路径本身由前端读取 location.pathname 还原
+		r = r.Clone(r.Context())
+		r.URL.Path = "/"
 	}
 	http.FileServer(http.FS(sub)).ServeHTTP(w, r)
 }

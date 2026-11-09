@@ -3,6 +3,10 @@
 .dev.vars
 *.pem
 
+# runtime data（channels.json 含密钥、records.jsonl 含推送正文）
+/data/
+*.tgz
+
 # build
 /qq-notify-gateway
 *.exe
