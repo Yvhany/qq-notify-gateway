@@ -3,6 +3,7 @@ package main
 import (
 	"embed"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -45,7 +46,7 @@ type webUI struct {
 	clients   *channelHub
 	listener  *openIDListener
 	retention *retentionState
-	hook      *hookInbox
+	hook      *hookStore
 }
 
 func newWebUI(cfg Config, store *RecordStore, hub *Hub, dataDir string, channels *channelStore, clients *channelHub, listener *openIDListener, retention *retentionState) *webUI {
@@ -60,7 +61,7 @@ func newWebUI(cfg Config, store *RecordStore, hub *Hub, dataDir string, channels
 		clients:   clients,
 		listener:  listener,
 		retention: retention,
-		hook:      newHookInbox(hub),
+		hook:      LoadHookStore(dataDir, hub),
 	}
 }
 
@@ -113,21 +114,73 @@ func (u *webUI) handleRecordGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "record": rec})
 }
 
-// handleTestInboxList 返回「Webhook 测试」收件箱最近请求（新→旧）。
-func (u *webUI) handleTestInboxList(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if limit <= 0 || limit > hookInboxCap {
-		limit = hookInboxCap
-	}
-	total, items := u.hook.List(limit)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "total": total, "items": items})
+// handleHookState 返回地址列表与选中地址的收件（slug 为空取当前地址）。
+func (u *webUI) handleHookState(w http.ResponseWriter, r *http.Request) {
+	slug := strings.TrimSpace(r.URL.Query().Get("slug"))
+	cur, sessions, entries, _ := u.hook.State(time.Now(), slug)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":       true,
+		"current":  cur,
+		"sessions": sessions,
+		"entries":  entries,
+	})
 }
 
-// handleTestInboxClear 清空收件箱（内存缓冲，不影响推送记录）。
-func (u *webUI) handleTestInboxClear(w http.ResponseWriter, r *http.Request) {
-	n := u.hook.Clear()
-	u.hub.Broadcast("hook_cleared", map[string]any{"removed": n})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": n})
+// handleHookNew 生成新测试地址；当前地址仍有效时必须先作废。
+func (u *webUI) handleHookNew(w http.ResponseWriter, r *http.Request) {
+	sess, err := u.hook.Create(time.Now())
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	u.hub.Broadcast("hook_session", map[string]any{"action": "create", "slug": sess.Slug})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "slug": sess.Slug})
+}
+
+// handleHookRevoke 作废当前地址（立即停止接收，数据仍可查看）。
+func (u *webUI) handleHookRevoke(w http.ResponseWriter, r *http.Request) {
+	sess, err := u.hook.Revoke(time.Now())
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	u.hub.Broadcast("hook_session", map[string]any{"action": "revoke", "slug": sess.Slug})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleHookEntryImage 输出收件里的图片（Content-Type 为 image/* 的报文，
+// 或 JSON 内 base64 图片解出来的那张）。
+func (u *webUI) handleHookEntryImage(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	data, ct, ok := u.hook.imageBytes(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(data)
+}
+
+// handleHookEntryBody 下载原始报文（不限体积）。
+func (u *webUI) handleHookEntryBody(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	data, ok := u.hook.bodyBytes(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="hook-%d.bin"`, id))
+	_, _ = w.Write(data)
 }
 
 // handleRetentionPost 应用保留策略：days>0 时立即清理更早的数据。

@@ -138,8 +138,8 @@ func newMux(n *notifier, ui *webUI) http.Handler {
 	// 测试收件箱：任意方法、任意子路径，只记录不推送。
 	// 必须按方法逐个注册：无方法模式 "/hook/" 会与 "GET /" 产生冲突（方法集不同但路径更泛）。
 	for _, m := range []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"} {
-		mux.HandleFunc(m+" /hook", ui.hook.ServeHTTP)
-		mux.HandleFunc(m+" /hook/", ui.hook.ServeHTTP)
+		mux.HandleFunc(m+" /hook/{slug}", ui.hook.ServeHTTP)
+		mux.HandleFunc(m+" /hook/{slug}/{rest...}", ui.hook.ServeHTTP)
 	}
 
 	// Web UI（内嵌前端与 API）
@@ -170,8 +170,11 @@ func newMux(n *notifier, ui *webUI) http.Handler {
 	mux.HandleFunc("POST /api/channels/{id}/token/reset", ui.handleChannelTokenReset)
 
 	mux.HandleFunc("GET /api/ws", ui.hub.ServeWS)
-	mux.HandleFunc("GET /api/test/inbox", ui.handleTestInboxList)
-	mux.HandleFunc("DELETE /api/test/inbox", ui.handleTestInboxClear)
+	mux.HandleFunc("GET /api/hook", ui.handleHookState)
+	mux.HandleFunc("POST /api/hook/new", ui.handleHookNew)
+	mux.HandleFunc("POST /api/hook/revoke", ui.handleHookRevoke)
+	mux.HandleFunc("GET /api/hook/entry/{id}/image", ui.handleHookEntryImage)
+	mux.HandleFunc("GET /api/hook/entry/{id}/body", ui.handleHookEntryBody)
 	mux.HandleFunc("GET /", ui.handleIndex)
 	return mux
 }

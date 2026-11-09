@@ -121,7 +121,7 @@ input[type=checkbox],input[type=radio]{accent-color:#111111;width:14px;height:14
 .rd-body{padding:16px 18px;white-space:pre-wrap;word-break:break-word;font-size:13.5px;line-height:1.8;color:var(--text)}
 .rd-body:empty{display:none}
 .rd-err{margin:0 18px 16px;padding:11px 13px;border-radius:5px;background:#0f0f0f;color:#fff;font-family:ui-monospace,monospace;font-size:11.5px;line-height:1.7;white-space:pre-wrap;word-break:break-all}
-.rd-imgwrap{padding:0 18px 18px}
+.rd-imgwrap{padding:16px 18px;border-bottom:1px solid var(--line-2)}
 .rd-img{max-width:100%;max-height:320px;width:auto;height:auto;object-fit:contain;border:1px solid var(--line);border-radius:4px;cursor:zoom-in;display:block}
 /* 详细信息折叠区 */
 .rd-more{padding:0 18px 16px}
@@ -265,19 +265,22 @@ input[type=checkbox],input[type=radio]{accent-color:#111111;width:14px;height:14
       <!-- Webhook 测试 -->
       <section class="view" id="v-hooktest">
         <div class="page-head">
-          <div><h1>Webhook 测试</h1><p>发到下面地址的任何请求都会被原样记录下来，不推送 QQ、不校验密钥，适合接新服务前先看报文</p></div>
+          <div><h1>Webhook 测试</h1><p>生成一个临时接收地址，任何请求都会被原样记录下来：不推送 QQ、不校验密钥，适合接新服务前先看报文</p></div>
           <div style="display:flex;gap:8px">
-            <button class="btn" onclick="loadHookInbox()">刷新</button>
-            <button class="btn danger" onclick="clearHookInbox()">清空</button>
+            <button class="btn" onclick="loadHook()">刷新</button>
+            <button class="btn primary" id="hookNewBtn" onclick="newHookSession()">生成新地址</button>
           </div>
         </div>
         <div class="card"><div class="card-b">
           <div class="endpoint">
             <svg class="icon" style="color:var(--text-3)" viewBox="0 0 24 24"><path d="M20 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zm0 12h-4l-2 2h-4l-2-2H4V6h16v10z"/></svg>
-            <span class="url" id="hookUrl">–</span>
+            <span class="url" id="hookUrl">尚未生成地址</span>
+            <span class="badge" id="hookState">—</span>
             <button class="btn sm" onclick="copyText(document.getElementById('hookUrl').textContent,'接收地址')">复制</button>
+            <button class="btn sm danger" id="hookRevokeBtn" onclick="revokeHookSession()">作废</button>
           </div>
-          <div style="font-size:12px;color:var(--text-3);margin-bottom:14px">任意方法、任意子路径都能收（<span class="mono">/hook</span>、<span class="mono">/hook/xxx</span>、<span class="mono">/hook?a=1</span>）。只保留最近 100 条，重启后清空。</div>
+          <div id="hookHint" style="font-size:12px;color:var(--text-3);margin-bottom:14px"></div>
+          <div id="hookSessions" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px"></div>
           <table>
             <thead><tr><th>编号</th><th>方法</th><th>路径</th><th>来源</th><th>大小</th><th>时间</th></tr></thead>
             <tbody id="hookBody"></tbody>
@@ -389,11 +392,11 @@ input[type=checkbox],input[type=radio]{accent-color:#111111;width:14px;height:14
     <div class="rd-head"><span class="id" id="rdId">#0</span></div>
     <button class="rd-close" onclick="closeRecord()" aria-label="关闭"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
     <div class="rd-meta" id="rdMeta"></div>
+    <div class="rd-imgwrap" id="rdImgWrap" style="display:none"><img class="rd-img" id="rdImg" alt="图片"></div>
     <div class="rd-more" id="rdMoreWrap" style="display:none"><button class="btn sm" id="rdMoreBtn" onclick="toggleDetail()">详细信息</button></div>
     <div class="rd-detail" id="rdDetail" style="display:none"></div>
     <div class="rd-body" id="rdBody"></div>
     <div class="rd-err" id="rdErr" style="display:none"></div>
-    <div class="rd-imgwrap" id="rdImgWrap" style="display:none"><img class="rd-img" id="rdImg" alt="截图"></div>
   </div>
 </div>
 <!-- 图片灯箱 -->
@@ -424,7 +427,7 @@ menus.forEach(function(m){m.addEventListener('click',function(){
   if(v==='logs')loadLogs();
   if(v==='settings'){loadConfig();loadOpenID();}
   if(v==='webhook')loadWebhook();
-  if(v==='hooktest')loadHookInbox();
+  if(v==='hooktest'){hookSel='';loadHook()}
 });});
 
 /* ===== API ===== */
@@ -580,7 +583,7 @@ function renderDetail(d){
     h+=detailBlock('请求头',keys.map(function(k){return k+': '+d.headers[k]}).join('\n'));
   }
   if(d.body){
-    h+=detailBlock('请求体'+(d.body_truncated?'（已截断，仅显示前 16KB）':''),d.body);
+    h+=detailBlock('请求体'+(d.body_truncated?'（预览，超出部分已省略，完整内容请下载原始报文）':''),d.body);
   }
   return h;
 }
@@ -1021,40 +1024,116 @@ async function testCh(id){
   toast('测试消息已发送，请看 QQ');loadChannels(true);
 }
 
-/* ===== Webhook 测试收件箱 ===== */
-var hookItems=[];
-function hookBaseUrl(){
+/* ===== Webhook 测试（8 位随机地址 / 12 小时有效） ===== */
+var hookData={current:'',sessions:[],entries:[]};
+var hookSel='';
+var hookTimer=null;
+
+function hookBase(){
   var el=document.getElementById('whInput');
   var b=el?el.value.trim():'';
   if(!b)b=(location.protocol+'//'+location.hostname+':18080');
-  return b.replace(/\/+$/,'')+'/hook';
+  return b.replace(/\/+$/,'');
 }
-async function loadHookInbox(){
+function fmtSize(n){
+  n=n||0;
+  if(n<1024)return n+' B';
+  if(n<1048576)return (n/1024).toFixed(1)+' KB';
+  return (n/1048576).toFixed(1)+' MB';
+}
+function fmtDur(ms){
+  if(ms<=0)return '已过期';
+  var s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor(s%3600/60);
+  return h+' 小时 '+m+' 分';
+}
+async function loadHook(slug){
+  if(slug!==undefined)hookSel=slug;
   try{
-    var d=await jget('/api/test/inbox?limit=100');
-    hookItems=d.items||[];
-    var u=hookBaseUrl();
-    var el=document.getElementById('hookUrl');
-    if(el&&el.textContent!==u)el.textContent=u;
-    var body=document.getElementById('hookBody');
-    if(!hookItems.length){
-      body.innerHTML='<tr><td colspan="6" style="color:var(--text-3);text-align:center;padding:26px">还没有请求。把上面的地址填进要测试的服务，发一条试试。</td></tr>';
-      return;
-    }
-    body.innerHTML=hookItems.map(function(e){
+    var d=await jget('/api/hook'+(hookSel?'?slug='+encodeURIComponent(hookSel):''));
+    hookData=d;hookSel=d.current||'';
+    renderHook();
+  }catch(e){toast('加载失败')}
+}
+function renderHook(){
+  var list=hookData.sessions||[];
+  var cur=null;
+  for(var i=0;i<list.length;i++){if(list[i].slug===hookSel)cur=list[i]}
+  var urlEl=document.getElementById('hookUrl'),
+      stateEl=document.getElementById('hookState'),
+      hint=document.getElementById('hookHint'),
+      revokeBtn=document.getElementById('hookRevokeBtn'),
+      newBtn=document.getElementById('hookNewBtn');
+  if(!cur){
+    urlEl.textContent='尚未生成地址';
+    stateEl.textContent='未开始';stateEl.className='badge';
+    hint.textContent='点右上角「生成新地址」，会得到一个 8 位随机的接收地址，12 小时内有效。';
+    revokeBtn.disabled=true;newBtn.disabled=false;
+  }else{
+    urlEl.textContent=hookBase()+'/hook/'+cur.slug;
+    if(cur.alive){stateEl.textContent='接收中';stateEl.className='badge s'}
+    else if(cur.revoked){stateEl.textContent='已作废';stateEl.className='badge e'}
+    else {stateEl.textContent='已过期';stateEl.className='badge e'}
+    revokeBtn.disabled=!cur.alive;
+    newBtn.disabled=!!cur.alive;
+    hint.textContent='';
+    newBtn.title=cur.alive?'请先作废当前地址':'';
+  }
+  document.getElementById('hookSessions').innerHTML=list.map(function(s){
+    var cls='btn sm'+(s.slug===hookSel?' primary':'');
+    var tag=s.alive?'':(s.revoked?' · 作废':' · 过期');
+    return '<button class="'+cls+'" onclick="loadHook(\''+s.slug+'\')">'+s.slug+tag+' · '+s.count+'</button>';
+  }).join('');
+  var body=document.getElementById('hookBody');
+  var items=hookData.entries||[];
+  if(!items.length){
+    body.innerHTML='<tr><td colspan="6" style="color:var(--text-3);text-align:center;padding:26px">'+
+      (cur?'还没有请求。把上面的地址填进要测试的服务，发一条试试。':'先生成一个接收地址。')+'</td></tr>';
+  }else{
+    body.innerHTML=items.map(function(e){
       return '<tr class="rec-row" onclick="openHookEntry('+e.id+')">'+
         '<td class="id-cell"><div class="num">#'+e.id+'</div></td>'+
         '<td><span class="badge">'+esc(e.method)+'</span></td>'+
         '<td class="mono" style="color:var(--text-2);word-break:break-all">'+esc(e.path+(e.query?'?'+e.query:''))+'</td>'+
         '<td>'+esc(e.remote_ip||'—')+'</td>'+
-        '<td>'+(e.body_bytes||0)+' B</td>'+
+        '<td>'+fmtSize(e.body_bytes)+'</td>'+
         '<td>'+esc(fmtTs(e.ts))+'</td></tr>';
     }).join('');
-  }catch(e){toast('加载失败')}
+  }
+  updateHookCountdown();
+  if(hookTimer)clearInterval(hookTimer);
+  hookTimer=setInterval(updateHookCountdown,1000);
+}
+function updateHookCountdown(){
+  var list=hookData.sessions||[];
+  var cur=null;
+  for(var i=0;i<list.length;i++){if(list[i].slug===hookSel)cur=list[i]}
+  var hint=document.getElementById('hookHint');
+  if(!hint||!cur)return;
+  if(cur.alive){
+    var left=new Date(cur.expires_at).getTime()-Date.now();
+    hint.textContent='剩余有效期 '+fmtDur(left)+'，到期后自动停止接收。数据保留 15 天，可随时回看。';
+  }else{
+    hint.textContent='该地址已停止接收。数据保留到创建后 15 天，可随时回看。';
+  }
+}
+async function newHookSession(){
+  try{
+    var r=await jpost('/api/hook/new',{});
+    if(!r.ok){toast(r.error||'生成失败');return}
+    toast('已生成新地址');hookSel=r.slug;loadHook(r.slug);
+  }catch(e){toast('网络错误，生成失败')}
+}
+async function revokeHookSession(){
+  if(!confirm('作废后该地址立即停止接收。数据仍可查看，确定作废？'))return;
+  try{
+    var r=await jpost('/api/hook/revoke',{});
+    if(!r.ok){toast(r.error||'作废失败');return}
+    toast('已作废');loadHook();
+  }catch(e){toast('网络错误，作废失败')}
 }
 function openHookEntry(id){
-  var e=null;
-  for(var i=0;i<hookItems.length;i++){if(hookItems[i].id===id){e=hookItems[i];break}}
+  var e=null,items=hookData.entries||[];
+  for(var i=0;i<items.length;i++){if(items[i].id===id){e=items[i];break}}
   if(!e)return;
   recDetailData=null;
   document.getElementById('rdMoreWrap').style.display='none';
@@ -1063,28 +1142,35 @@ function openHookEntry(id){
   document.getElementById('rdMeta').innerHTML=
     '<span class="rd-k">时间</span><span class="rd-v">'+esc(fmtTs(e.ts))+'</span>'+
     '<span class="rd-k">来源</span><span class="rd-v">'+esc(e.remote_ip||'—')+'</span>'+
-    '<span class="rd-k">大小</span><span class="rd-v">'+(e.body_bytes||0)+' 字节</span>'+
+    '<span class="rd-k">大小</span><span class="rd-v">'+fmtSize(e.body_bytes)+'</span>'+
     '<span class="rd-k">协议</span><span class="rd-v">'+esc(e.proto||'—')+'</span>';
   document.getElementById('rdBody').textContent='';
   document.getElementById('rdErr').style.display='none';
-  document.getElementById('rdImgWrap').style.display='none';
+  var wrap=document.getElementById('rdImgWrap');
+  if(e.is_image||e.image_file){
+    var im=document.getElementById('rdImg');
+    im.src='/api/hook/entry/'+e.id+'/image?t='+Date.now();
+    im.onclick=function(){openLightbox(this.src)};
+    wrap.style.display='block';
+  }else{
+    wrap.style.display='none';
+  }
   var box=document.getElementById('rdDetail');
-  box.innerHTML=renderDetail({
+  var html=renderDetail({
     method:e.method,path:e.path+(e.query?'?'+e.query:''),remote_ip:e.remote_ip,
     content_type:(e.headers||{})['Content-Type']||'',body_bytes:e.body_bytes,
-    headers:e.headers,body:e.body,body_truncated:e.truncated
+    headers:e.headers,
+    body:e.binary?'':(e.preview||''),
+    body_truncated:e.truncated
   });
+  if(e.binary){
+    html+='<div class="rd-sec"><h4>请求体</h4><div class="rd-pre" style="color:var(--text-3)">二进制内容，无法以文本展示，请下载原始报文查看。</div></div>';
+  }
+  html+='<div class="rd-sec"><h4>原始报文</h4><a class="btn sm" href="/api/hook/entry/'+e.id+'/body" download>下载 '+fmtSize(e.body_bytes)+'</a></div>';
+  box.innerHTML=html;
   box.style.display='block';
   document.getElementById('recModal').style.display='flex';
   document.title=e.method+' '+e.path;
-}
-async function clearHookInbox(){
-  try{
-    var r=await (await fetch('/api/test/inbox',{method:'DELETE'})).json();
-    if(!r.ok){toast(r.error||'清空失败');return}
-    toast('已清空 '+r.removed+' 条');
-    loadHookInbox();
-  }catch(e){toast('网络错误，清空失败')}
 }
 
 /* ===== WebSocket：仅页面可见时连接 ===== */
@@ -1107,8 +1193,8 @@ function wsConnect(){
       else if(ev.type==='records_purged'){if(document.getElementById('v-records').classList.contains('on'))loadRecords(recPage)}
       else if(ev.type==='retention'){renRet(ev.data.days)}
       else if(ev.type==='channels'){loadChannels(true)}
-      else if(ev.type==='hook'){if(document.getElementById('v-hooktest').classList.contains('on'))loadHookInbox()}
-      else if(ev.type==='hook_cleared'){if(document.getElementById('v-hooktest').classList.contains('on'))loadHookInbox()}
+      else if(ev.type==='hook'){if(document.getElementById('v-hooktest').classList.contains('on')&&ev.data.slug===hookSel)loadHook()}
+      else if(ev.type==='hook_session'){if(document.getElementById('v-hooktest').classList.contains('on'))loadHook()}
     }catch(err){}
   };
   ws.onclose=function(){ws=null;setWsDot(false,'已断开');

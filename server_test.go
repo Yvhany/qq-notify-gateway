@@ -7,9 +7,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/oauth2"
 )
@@ -448,48 +450,147 @@ func TestRecordDetailCaptured(t *testing.T) {
 	}
 }
 
-func TestHookInbox(t *testing.T) {
+func TestHookSessions(t *testing.T) {
 	env := newTestEnv(t, "c2c", func(w http.ResponseWriter, r *http.Request) {
 		t.Error("测试收件箱不应调用 QQ")
 	})
+	h := env.ui.hook
+	now := time.Now()
 
-	// 任意方法 + 任意子路径都能收
-	req := httptest.NewRequest(http.MethodPost, "/hook/a/b?x=1", strings.NewReader(`{"hello":"world"}`))
-	req.Header.Set("X-Gateway-Token", "supersecretvalue123456")
+	// 1. 没有任何地址时，任何 /hook/xxx 都是 404（不区分「不存在」与「已失效」）
+	w := httptest.NewRecorder()
+	env.handler.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/hook/abcdefgh", strings.NewReader("x")))
+	if w.Code != http.StatusNotFound {
+		t.Errorf("无地址时期望 404，得到 %d", w.Code)
+	}
+
+	// 2. 生成地址
+	sess, err := h.Create(now)
+	if err != nil {
+		t.Fatalf("生成地址失败: %v", err)
+	}
+	if len(sess.Slug) != hookSlugLen {
+		t.Errorf("slug 长度应为 %d，得到 %q", hookSlugLen, sess.Slug)
+	}
+
+	// 3. 有效期内可接收，敏感头打码
+	const token = "supersecretvalue123456"
+	req := httptest.NewRequest(http.MethodPost, "/hook/"+sess.Slug+"/sub?x=1", strings.NewReader(`{"hi":"there"}`))
+	req.Header.Set("X-Gateway-Token", token)
 	rec := httptest.NewRecorder()
 	env.handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("/hook 期望 200，得到 %d", rec.Code)
+		t.Fatalf("有效期内心期望 200，得到 %d", rec.Code)
 	}
 
-	code, m := doJSON(t, env.handler, httptest.NewRequest(http.MethodGet, "/api/test/inbox", nil))
-	if code != http.StatusOK {
-		t.Fatalf("列表接口期望 200，得到 %d", code)
+	_, sums, entries, _ := h.State(now, "")
+	if len(sums) != 1 || sums[0].Count != 1 {
+		t.Fatalf("会话摘要不符: %+v", sums)
 	}
-	items, _ := m["items"].([]any)
-	if len(items) != 1 {
-		t.Fatalf("期望 1 条，得到 %d", len(items))
+	if len(entries) != 1 {
+		t.Fatalf("期望 1 条收件，得到 %d", len(entries))
 	}
-	e, _ := items[0].(map[string]any)
-	if e["method"] != "POST" || e["path"] != "/hook/a/b" || e["query"] != "x=1" {
-		t.Errorf("请求元信息不符: %v", e)
+	e := entries[0]
+	if e.Method != "POST" || e.Path != "/hook/"+sess.Slug+"/sub" || e.Query != "x=1" {
+		t.Errorf("请求元信息不符: %+v", e)
 	}
-	if body, _ := e["body"].(string); body != `{"hello":"world"}` {
-		t.Errorf("请求体不符: %q", body)
-	}
-	hdrs, _ := e["headers"].(map[string]any)
-	if got, _ := hdrs["X-Gateway-Token"].(string); got == "supersecretvalue123456" {
-		t.Error("收件箱里的敏感头未打码")
+	if got := e.Headers["X-Gateway-Token"]; got == token {
+		t.Error("敏感请求头未打码")
 	}
 
-	code, m = doJSON(t, env.handler, httptest.NewRequest(http.MethodDelete, "/api/test/inbox", nil))
-	if code != http.StatusOK {
-		t.Fatalf("清空接口期望 200，得到 %d", code)
+	// 4. 当前地址未作废时，不允许生成新地址
+	if _, err := h.Create(now); err == nil {
+		t.Error("地址仍有效时应拒绝生成新地址")
 	}
-	if removed, _ := m["removed"].(float64); removed != 1 {
-		t.Errorf("期望清空 1 条，得到 %v", m["removed"])
+
+	// 5. 作废后立即停止接收
+	if _, err := h.Revoke(now); err != nil {
+		t.Fatalf("作废失败: %v", err)
 	}
-	if _, m := doJSON(t, env.handler, httptest.NewRequest(http.MethodGet, "/api/test/inbox", nil)); m["total"].(float64) != 0 {
-		t.Errorf("清空后应为空，得到 %v", m["total"])
+	w = httptest.NewRecorder()
+	env.handler.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/hook/"+sess.Slug, strings.NewReader("x")))
+	if w.Code != http.StatusNotFound {
+		t.Errorf("作废后期望 404，得到 %d", w.Code)
+	}
+
+	// 6. 作废后可以生成新地址，旧会话数据仍可查看
+	sess2, err := h.Create(now)
+	if err != nil {
+		t.Fatalf("作废后生成新地址失败: %v", err)
+	}
+	if sess2.Slug == sess.Slug {
+		t.Error("新地址不应与旧地址相同")
+	}
+	_, sums2, oldEntries, _ := h.State(now, sess.Slug)
+	if len(sums2) != 2 {
+		t.Errorf("应保留 2 个会话，得到 %d", len(sums2))
+	}
+	if len(oldEntries) != 1 {
+		t.Errorf("旧会话的收件应仍可查看，得到 %d 条", len(oldEntries))
+	}
+}
+
+func TestHookEntryCapAndImage(t *testing.T) {
+	env := newTestEnv(t, "c2c", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("测试收件箱不应调用 QQ")
+	})
+	h := env.ui.hook
+	now := time.Now()
+	sess, err := h.Create(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 超过 hookEntriesPer 后只保留最新的
+	for i := 0; i < hookEntriesPer+5; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/hook/"+sess.Slug, strings.NewReader("payload-"+strconv.Itoa(i)))
+		rec := httptest.NewRecorder()
+		env.handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("第 %d 条期望 200，得到 %d", i, rec.Code)
+		}
+	}
+	_, sums, entries, _ := h.State(now, "")
+	if sums[0].Count != hookEntriesPer {
+		t.Errorf("应收敛到 %d 条，得到 %d", hookEntriesPer, sums[0].Count)
+	}
+	if !strings.Contains(entries[0].Preview, strconv.Itoa(hookEntriesPer+4)) {
+		t.Errorf("最新一条应在首位，实际 %q", entries[0].Preview)
+	}
+
+	// Content-Type: image/* 的报文按图片处理，且能取回原图（不被截断）
+	png := pngMagic(1024)
+	req := httptest.NewRequest(http.MethodPost, "/hook/"+sess.Slug, bytes.NewReader(png))
+	req.Header.Set("Content-Type", "image/png")
+	rec := httptest.NewRecorder()
+	env.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("图片上传期望 200，得到 %d", rec.Code)
+	}
+	_, _, entries, _ = h.State(now, "")
+	img := entries[0]
+	if !img.IsImage {
+		t.Error("image/png 应标记为图片")
+	}
+	if img.BodyBytes != int64(len(png)) {
+		t.Errorf("图片字节数应完整保留 %d，得到 %d", len(png), img.BodyBytes)
+	}
+	data, ct, ok := h.imageBytes(img.ID)
+	if !ok || len(data) != len(png) || !strings.HasPrefix(ct, "image/") {
+		t.Errorf("取回图片失败: ok=%v len=%d ct=%s", ok, len(data), ct)
+	}
+
+	// JSON 里的 base64 图片应被单独解出
+	body := `{"title":"带图","image":"` + base64.StdEncoding.EncodeToString(png) + `"}`
+	req = httptest.NewRequest(http.MethodPost, "/hook/"+sess.Slug, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	env.handler.ServeHTTP(rec, req)
+	_, _, entries, _ = h.State(now, "")
+	if entries[0].ImageFile == "" {
+		t.Error("JSON 内的 base64 图片应被解出")
+	}
+	if data, _, ok := h.imageBytes(entries[0].ID); !ok || len(data) != len(png) {
+		t.Errorf("JSON 图片取回失败: ok=%v len=%d", ok, len(data))
 	}
 }
